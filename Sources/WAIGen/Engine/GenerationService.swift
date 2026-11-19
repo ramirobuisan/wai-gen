@@ -84,6 +84,8 @@ final class GenerationService: @unchecked Sendable {
     // everything below is only touched on `queue`
     private var mlx: [String: WaiSDXL] = [:]
     private var sdcpp: [String: SDCppEngine] = [:]
+    /// MLX diffusion models standing in for stable-diffusion.cpp's (WAI-ANIMA), by preset id
+    private var mlxDiT: [String: MLXDiTBridge] = [:]
     private var detector: SDCppFaceDetector?
     private var upscalers: [URL: ModelUpscaler] = [:]
     private var preloadSteps: [(name: String, load: () throws -> Void)] = []
@@ -108,6 +110,7 @@ final class GenerationService: @unchecked Sendable {
             self.setActive(nil)
             self.preloadSteps.removeAll()
             self.sdcpp.removeAll()
+            self.mlxDiT.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             self.mlx.removeAll()
@@ -177,6 +180,7 @@ final class GenerationService: @unchecked Sendable {
         guard !Self.keepAllLoaded else { return }
         mlx = mlx.filter { $0.key == id }
         sdcpp = sdcpp.filter { $0.key == id }
+        mlxDiT = mlxDiT.filter { $0.key == id }
         Memory.clearCache()
     }
 
@@ -198,6 +202,12 @@ final class GenerationService: @unchecked Sendable {
         let e = try SDCppEngine(diffusionModel: file(p.diffusionModel), llm: file(p.llm), vae: file(p.vae))
         // its VAE runs in MLX (sd.cpp's Metal VAE takes minutes at hi-res sizes); sd.cpp's own is the fallback
         if let vae = try? QwenImageVAE(url: file(p.vae)) { e.externalVAE = MLXVAEBridge(vae) }
+        // and so does the diffusion model (sd.cpp then never loads its own copy of the weights)
+        if let dit = try? AnimaDiT(url: file(p.diffusionModel)) {
+            let bridge = MLXDiTBridge(dit)
+            e.externalDiffusion = bridge
+            if e.externalDiffusionActive { mlxDiT[p.id] = bridge } else { e.externalDiffusion = nil }
+        }
         sdcpp[p.id] = e
         names[p.id] = p.name
         reportModels()
@@ -269,6 +279,7 @@ final class GenerationService: @unchecked Sendable {
             self.preloadSteps.removeAll()
             self.mlx.removeAll()
             self.sdcpp.removeAll()
+            self.mlxDiT.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             Memory.clearCache()
@@ -293,7 +304,13 @@ final class GenerationService: @unchecked Sendable {
     private func sdcppEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> SDCppEngine {
         let p = job.preset
         if sdcpp[p.id] == nil { progress(.loadingModel(p.name)) }
-        return try loadSDCpp(p, job.modelsRoot)
+        let engine = try loadSDCpp(p, job.modelsRoot)
+        // LoRAs are applied inside stable-diffusion.cpp's own model: use it for jobs with LoRAs
+        if let bridge = mlxDiT[p.id] {
+            let wanted: SDCppExternalDiffusion? = job.loras.isEmpty ? bridge : nil
+            if (engine.externalDiffusion == nil) != (wanted == nil) { engine.externalDiffusion = wanted }
+        }
+        return engine
     }
 
     private func modelUpscaler(_ url: URL) throws -> ModelUpscaler {

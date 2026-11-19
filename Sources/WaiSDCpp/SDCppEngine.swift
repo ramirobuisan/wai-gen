@@ -258,10 +258,43 @@ public protocol SDCppExternalVAE: AnyObject {
     func decode(_ input: UnsafePointer<Float>, shape: [Int], into output: UnsafeMutablePointer<Float>, outputShape: [Int]) -> Bool
 }
 
+/// A diffusion model that stable-diffusion.cpp should run instead of its own (WAI Gen patch; Anima).
+/// Buffers are float32 in C order: x [N, C, H, W], context [N, L, D]; write the prediction (same shape
+/// as x) to `output`. Return false to let stable-diffusion.cpp run its built-in model for that call.
+public protocol SDCppExternalDiffusion: AnyObject {
+    func forward(x: UnsafePointer<Float>, shape: [Int], timesteps: UnsafePointer<Float>, nTimesteps: Int,
+                 context: UnsafePointer<Float>, contextShape: [Int], tokenIDs: UnsafePointer<Int32>?,
+                 tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool
+}
+
 /// Owns one stable-diffusion.cpp context (models stay loaded between generations).
 public final class SDCppEngine: @unchecked Sendable {
     private var ctx: OpaquePointer?
     private var progressHandler: ((String, Int64, Int64) -> Void)?
+
+    /// Runs the diffusion model's forward passes instead of stable-diffusion.cpp (Anima models only).
+    /// Set it while the engine is idle; reading `externalDiffusionActive` tells whether the model took it.
+    public private(set) var externalDiffusionActive = false
+    public var externalDiffusion: SDCppExternalDiffusion? {
+        didSet {
+            guard let ctx else { return }
+            guard externalDiffusion != nil else {
+                _ = sd_set_diffusion_hook(ctx, nil, nil)
+                externalDiffusionActive = false
+                return
+            }
+            externalDiffusionActive = sd_set_diffusion_hook(ctx, { x, xs, ts, nts, c, cs, ids, wts, ntok, out, data in
+                guard let x, let xs, let ts, let c, let cs, let out, let data else { return false }
+                let engine = Unmanaged<SDCppEngine>.fromOpaque(data).takeUnretainedValue()
+                guard let model = engine.externalDiffusion else { return false }
+                // ggml order -> C order
+                let shape = [Int(xs[3]), Int(xs[2]), Int(xs[1]), Int(xs[0])]
+                let ctxShape = [Int(cs[2]), Int(cs[1]), Int(cs[0])]
+                return model.forward(x: x, shape: shape, timesteps: ts, nTimesteps: Int(nts), context: c,
+                                     contextShape: ctxShape, tokenIDs: ids, tokenWeights: wts, nTokens: Int(ntok), into: out)
+            }, Unmanaged.passUnretained(self).toOpaque())
+        }
+    }
 
     /// Used for every VAE encode/decode of single images in this context (txt2img, img2img, hi-res,
     /// face repair). Set it while the engine is idle.
@@ -326,6 +359,7 @@ public final class SDCppEngine: @unchecked Sendable {
         if let ctx {
             sd_set_generation_progress_callback(ctx, nil, nil)
             sd_set_vae_hook(ctx, nil, nil)
+            _ = sd_set_diffusion_hook(ctx, nil, nil)
             sd_ctx_free(ctx)
         }
     }

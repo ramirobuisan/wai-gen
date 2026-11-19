@@ -38,6 +38,18 @@ func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
     return try SDCppUpscaler(model: URL(fileURLWithPath: path)).upscale(img)
 }
 
+/// MLX Anima model for stable-diffusion.cpp's diffusion forward passes
+final class MLXDiTBridge: SDCppExternalDiffusion {
+    let model: AnimaDiT
+    init(_ model: AnimaDiT) { self.model = model }
+    func forward(x: UnsafePointer<Float>, shape: [Int], timesteps: UnsafePointer<Float>, nTimesteps: Int,
+                 context: UnsafePointer<Float>, contextShape: [Int], tokenIDs: UnsafePointer<Int32>?,
+                 tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool {
+        model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
+                  tokenIDs: tokenIDs, tokenWeights: tokenWeights, nTokens: nTokens, into: output)
+    }
+}
+
 /// MLX VAE for stable-diffusion.cpp's single-image encode/decode
 final class MLXVAEBridge: SDCppExternalVAE {
     let vae: QwenImageVAE
@@ -84,6 +96,7 @@ let refinePath = take("--refine")        // upscale + detail pass on an existing
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
 let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (default) or sdcpp
 let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
+let ditEngine = take("--dit-engine") ?? "mlx"      // WAI-ANIMA diffusion model: mlx (default) or sdcpp
 let vaeRoundtrip = take("--vae-roundtrip")         // encode + decode an image with the MLX VAE and exit
 let esrganTest = take("--esrgan-test")             // upscale an image with --hires-upscaler in MLX and sd.cpp, compare
 
@@ -182,6 +195,12 @@ if let diffusionPath {
             diffusionModel: URL(fileURLWithPath: diffusionPath), llm: URL(fileURLWithPath: llmPath),
             vae: URL(fileURLWithPath: vaePath), weightType: weightType)
         if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
+        if ditEngine == "mlx" {
+            let td = Date()
+            engine.externalDiffusion = MLXDiTBridge(try AnimaDiT(url: URL(fileURLWithPath: diffusionPath)))
+            print(String(format: "MLX Anima model loaded in %.1fs (hook %@)", Date().timeIntervalSince(td),
+                         engine.externalDiffusionActive ? "active" : "NOT active"))
+        }
     } catch { fail(error.localizedDescription) }
     print(String(format: "loaded %@ in %.1fs", (diffusionPath as NSString).lastPathComponent, Date().timeIntervalSince(t0)))
 

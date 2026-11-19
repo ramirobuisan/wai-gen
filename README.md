@@ -10,7 +10,7 @@ ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt)
 | Model | Engine |
 |---|---|
 | WAI-illustrious-SDXL v16, v12 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
-| WAI-ANIMA v1.0 | **stable-diffusion.cpp** (Metal) for the diffusion model and text encoder, **MLX** for the VAE and the upscaler |
+| WAI-ANIMA v1.0 | **MLX** for the diffusion model, VAE and upscaler; **stable-diffusion.cpp** for the Qwen3 text encoder, sampler and face detector |
 
 Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-res, negatives).
 
@@ -39,6 +39,9 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 | WAI-ANIMA VAE decode, 1024×1344 | **0.27 s** (MLX) | ~45 s (stable-diffusion.cpp Metal) |
 | WAI-ANIMA VAE decode / encode, 1536×2016 | **0.68 s / 0.59 s** | ~135 s / ~85 s |
 | RealESRGAN x4plus anime 6B, 1024×1344 → 4096×5376 | **1.97 s** (MLX) | 27.5 s (stable-diffusion.cpp) |
+| WAI-ANIMA model, 1024×1344, per step | **1.36 s** (MLX) | 2.72 s (stable-diffusion.cpp) |
+| WAI v16 face repair, one face | **~6 s** (MLX) | 17.3 s (stable-diffusion.cpp) |
+| WAI-ANIMA 1024×1344 → 1536×2016, hi-res + face repair, in the app | **157 s** | 750 s with stable-diffusion.cpp alone |
 
 The MLX VAE and upscaler match stable-diffusion.cpp's output (PSNR 53.9 dB and 60.6 dB). They are also
 published on their own: [mlx-swift-qwen-image-vae](https://github.com/ramirobuisan/mlx-swift-qwen-image-vae)

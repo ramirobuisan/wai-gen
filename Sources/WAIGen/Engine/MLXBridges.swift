@@ -20,6 +20,19 @@ final class MLXVAEBridge: SDCppExternalVAE {
     }
 }
 
+/// Runs WAI-ANIMA's diffusion model in MLX for stable-diffusion.cpp (2x faster per step).
+final class MLXDiTBridge: SDCppExternalDiffusion {
+    let model: AnimaDiT
+    init(_ model: AnimaDiT) { self.model = model }
+
+    func forward(x: UnsafePointer<Float>, shape: [Int], timesteps: UnsafePointer<Float>, nTimesteps: Int,
+                 context: UnsafePointer<Float>, contextShape: [Int], tokenIDs: UnsafePointer<Int32>?,
+                 tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool {
+        model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
+                  tokenIDs: tokenIDs, tokenWeights: tokenWeights, nTokens: nTokens, into: output)
+    }
+}
+
 /// An upscaler model: MLX for ESRGAN (RRDBNet) files, ~14x faster than stable-diffusion.cpp;
 /// stable-diffusion.cpp for anything else.
 final class ModelUpscaler {

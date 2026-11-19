@@ -7,9 +7,9 @@ Apple M5 Max (128 GB), Release builds, unless noted. "Warm" = models already loa
 
 | Job | Time | Biggest part |
 |---|---|---|
-| WAI v16, 1024×1344, 28 steps | ~15 s | UNet sampling, ~0.5 s/step (MLX) |
-| WAI v16, 1024×1344 → 1536×2016 hi-res (15 steps) + face repair | see [round 2](#round-2-2026-11-19-evening) | hi-res sampling ~1.6 s/step |
-| WAI-ANIMA, 1024×1344 → 1536×2016 hi-res + face repair | 346 s (was 750 s) | the Anima diffusion model in stable-diffusion.cpp: ~4 s/step at 1024×1344, ~8.5 s/step at 1536×2016 |
+| WAI v16, 1024×1344, 28 steps | ~15-17 s | UNet sampling, ~0.6 s/step (MLX) |
+| WAI v16 face repair (one face) | ~6 s (was 17.3 s) | 11 masked steps at 1024×1024 (MLX) |
+| WAI-ANIMA, 1024×1344 → 1536×2016 hi-res + face repair, cold start | **157 s** (346 s this morning, 750 s originally) | the Anima model, now in MLX: 1.36 s/step at 1024×1344 |
 
 ## Round 1: engines (2026-11-19)
 
@@ -133,3 +133,37 @@ Now stable-diffusion.cpp only runs the YOLOv8 face detector (new `sd_adetailer_d
 
 WAI-ANIMA keeps stable-diffusion.cpp's
 own ADetailer (its repaint already uses the MLX VAE).
+
+### Large: WAI-ANIMA's diffusion model in MLX (`AnimaDiT.swift`)
+
+The Anima model (a Cosmos-Predict2-style DiT: 28 blocks, 2048 wide, 16 heads, plus a 6-block LLM adapter that
+turns Qwen3-0.6B states into the context) is ported line by line from stable-diffusion.cpp's `anima.hpp`:
+padding-mask channel and 2×2 patchify, `[cos | sin]` timestep embedding, AdaLN-Zero modulation
+(`LN(x)·(1+scale)+shift`, gates), per-head RMS-normed q/k, rotate-half RoPE over (0, row, col) with 44/42/42
+dims and NTK-scaled θ for rows and columns, tanh-GELU MLPs, `(ph pw c)` unpatchify.
+
+stable-diffusion.cpp still does everything around it: Qwen3 text encoding, the sampler and CFG, the progress
+and preview callbacks, face repair. The patch adds `sd_set_diffusion_hook()`: when set, Anima's forward pass
+calls the app with the latent, timestep, text states and adapter tokens instead of running its ggml graph
+(jobs with WAI-ANIMA LoRAs switch the hook off, because the LoRAs are applied inside stable-diffusion.cpp's model).
+stable-diffusion.cpp loads weights lazily, so with the hook it never loads its own copy of the model.
+
+| WAI-ANIMA, 1024×1344, 10 steps, same seed | stable-diffusion.cpp model | MLX model |
+|---|---|---|
+| per step | 2.72 s | **1.36 s** |
+| total | 29.1 s | **14.0 s** |
+
+The two images agree to 32.3 dB PSNR (bf16 rounding over 28 blocks × 10 steps; a wrong port gives ~10 dB)
+and look the same:
+
+![stable-diffusion.cpp vs MLX Anima model](images/anima-sdcpp-vs-mlx.jpg)
+
+**In the app**, WAI-ANIMA 1024×1344 → 1536×2016 with hi-res (15 steps, MLX ESRGAN) and face repair, including
+the cold model load: **156.8 s** (face repair 22.4 s), memory footprint 6.7 GB. The same job was 346 s this
+morning and 750 s before the VAE port.
+
+## Possible next steps
+
+- Generate "Images: 2+" as one batch on MLX (−12 % per image, measured above).
+- LoRAs for the MLX Anima model, so LoRA jobs don't fall back to stable-diffusion.cpp's model.
+- Batch the cond/uncond passes of WAI-ANIMA into one MLX call (stable-diffusion.cpp calls the model twice per step).

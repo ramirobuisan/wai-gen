@@ -1,8 +1,8 @@
 diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
-index c5a25c6..0ddd8dd 100644
+index c5a25c6..98d85f9 100644
 --- a/include/stable-diffusion.h
 +++ b/include/stable-diffusion.h
-@@ -251,6 +251,19 @@ typedef void (*sd_generation_progress_cb_t)(const sd_generation_progress_t* prog
+@@ -251,6 +251,37 @@ typedef void (*sd_generation_progress_cb_t)(const sd_generation_progress_t* prog
  // Register/clear only while the context is idle. Passing NULL clears the callback.
  SD_API void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_cb_t cb, void* data);
  
@@ -19,10 +19,28 @@ index c5a25c6..0ddd8dd 100644
 +                              void* data);
 +SD_API void sd_set_vae_hook(sd_ctx_t* ctx, sd_vae_hook_t hook, void* data);
 +
++// External diffusion model (WAI Gen patch; Anima only for now): one forward pass of the model.
++// x: latent [W,H,C,N] (ggml order = NCHW in C order); timesteps: N values as the model receives them;
++// context: text-encoder states [D,L,N] (= [N][L][D] in C order); token_ids / token_weights: the adapter
++// inputs (n_tokens each, may be NULL). Write the prediction (same shape as x) to `output`.
++// Return false to run the built-in model. Returns false when the model doesn't support a hook.
++typedef bool (*sd_diffusion_hook_t)(const float* x,
++                                    const int64_t* x_shape,
++                                    const float* timesteps,
++                                    int64_t n_timesteps,
++                                    const float* context,
++                                    const int64_t* context_shape,
++                                    const int32_t* token_ids,
++                                    const float* token_weights,
++                                    int64_t n_tokens,
++                                    float* output,
++                                    void* data);
++SD_API bool sd_set_diffusion_hook(sd_ctx_t* ctx, sd_diffusion_hook_t hook, void* data);
++
  typedef struct {
      int sample_pass;
      int total_steps;
-@@ -308,6 +321,16 @@ SD_API sd_status_t sd_upscale_video(
+@@ -308,6 +339,16 @@ SD_API sd_status_t sd_upscale_video(
  // ADetailer
  
  SD_API sd_status_t sd_adetailer_create(const sd_adetailer_opt_t* opt, sd_adetailer_t** out);
@@ -40,10 +58,15 @@ index c5a25c6..0ddd8dd 100644
  SD_API sd_status_t sd_adetail(
      sd_adetailer_t* adetailer,
 diff --git a/src/api/api.cpp b/src/api/api.cpp
-index 72cd6d4..5917dce 100644
+index 72cd6d4..c74bf6c 100644
 --- a/src/api/api.cpp
 +++ b/src/api/api.cpp
-@@ -90,6 +90,17 @@ void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_c
+@@ -1,3 +1,4 @@
++#include "model/diffusion/anima.hpp"
+ #include "api.h"
+ #include "options.h"
+ #include "result.h"
+@@ -90,6 +91,31 @@ void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_c
      }
  }
  
@@ -56,6 +79,20 @@ index 72cd6d4..5917dce 100644
 +        ctx->sd->vae_hook      = hook;
 +        ctx->sd->vae_hook_data = data;
 +    }
++}
++
++bool sd_set_diffusion_hook(sd_ctx_t* ctx, sd_diffusion_hook_t hook, void* data) {
++    if (ctx == nullptr || ctx->sd == nullptr) {
++        return false;
++    }
++    std::lock_guard<std::recursive_mutex> lock(ctx->sd->execution_mutex);
++    auto anima = std::dynamic_pointer_cast<Anima::AnimaRunner>(ctx->sd->diffusion_model);
++    if (ctx->sd->executing_ || !anima) {
++        return false;
++    }
++    anima->hook      = hook;
++    anima->hook_data = data;
++    return true;
 +}
 +
  static sd_ctx_t* create_context(const sd::ContextConfig& params) {
@@ -98,6 +135,45 @@ index 234afce..946c6ba 100644
  static bool run_adetail(sd_adetailer_t* context, sd_ctx_t* sd_ctx, sd::Image input_image, const sd::ADetailConfig* public_params, const sd::ImageConfig* inpaint_params, sd_result_t** result_out, sd_status_t& failure) {
      if (result_out)
          *result_out = nullptr;
+diff --git a/src/model/diffusion/anima.hpp b/src/model/diffusion/anima.hpp
+index 08c20fe..1cbda03 100644
+--- a/src/model/diffusion/anima.hpp
++++ b/src/model/diffusion/anima.hpp
+@@ -568,6 +568,9 @@ namespace Anima {
+     public:
+         AnimaConfig config;
+         AnimaNet net;
++        // external model (sd_set_diffusion_hook)
++        sd_diffusion_hook_t hook = nullptr;
++        void* hook_data          = nullptr;
+ 
+         AnimaRunner(ggml_backend_t backend,
+                     const String2TensorStorage& tensor_storage_map      = {},
+@@ -731,6 +734,24 @@ namespace Anima {
+             GGML_ASSERT(diffusion_params.x != nullptr);
+             GGML_ASSERT(diffusion_params.timesteps != nullptr);
+             const auto* extra = diffusion_extra_as<AnimaDiffusionExtra>(diffusion_params);
++            const bool has_refs = diffusion_params.ref_latents && diffusion_params.ref_image_params.pass_to_dit &&
++                                  !diffusion_params.ref_latents->empty();
++            if (hook != nullptr && !has_refs && diffusion_params.x->dim() == 4 && diffusion_params.context != nullptr &&
++                diffusion_params.context->dim() >= 2) {
++                const auto& x   = *diffusion_params.x;
++                const auto& ts  = *diffusion_params.timesteps;
++                const auto& ctx = *diffusion_params.context;
++                int64_t ctx_shape[3] = {ctx.shape()[0], ctx.shape()[1], ctx.dim() > 2 ? ctx.shape()[2] : 1};
++                const int32_t* ids   = (extra->t5_ids && !extra->t5_ids->empty()) ? extra->t5_ids->data() : nullptr;
++                const float* weights = (extra->t5_weights && !extra->t5_weights->empty()) ? extra->t5_weights->data() : nullptr;
++                int64_t n_tokens     = ids ? extra->t5_ids->numel() : 0;
++                sd::Tensor<float> out(x.shape());
++                if (hook(x.data(), x.shape().data(), ts.data(), ts.numel(), ctx.data(), ctx_shape, ids, weights, n_tokens,
++                         out.data(), hook_data)) {
++                    return out;
++                }
++                LOG_WARN("external anima model failed, using the built-in one");
++            }
+             static const std::vector<sd::Tensor<float>> empty_ref_latents;
+             return compute(n_threads,
+                            *diffusion_params.x,
 diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
 index c2ae6b8..699d0b5 100644
 --- a/src/pipeline/diffusion_engine.cpp
