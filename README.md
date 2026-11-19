@@ -1,3 +1,5 @@
+<img src="Resources/AppIcon-1024.png" width="128" alt="WAI Gen icon">
+
 # WAI Gen
 
 A native macOS app (SwiftUI) for generating anime images with the **WAI** model family. It runs
@@ -49,6 +51,7 @@ Requirements: Apple silicon, macOS 14+, Xcode 16+, CMake.
 ```bash
 scripts/build-sdcpp.sh          # stable-diffusion.cpp at the tested commit + patches/sdcpp-vae-hook.patch
 scripts/make-app.sh --install   # Release build -> ~/Applications/WAI Gen.app
+swift scripts/make-icon.swift   # only to redraw the app icon (Resources/AppIcon.icns)
 ```
 
 Open `Package.swift` in Xcode once and trust the mlx-swift build plugin if it asks (xcodebuild needs it
