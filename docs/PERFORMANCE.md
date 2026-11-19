@@ -386,6 +386,40 @@ run (e.g. `4x-UltraSharpV2`, a DAT transformer) are no longer listed.
 In the app (cold, model loading in the background, Step cache off): WAI-ANIMA 1024×1344 → 1536×2016 with
 face repair 145 s (154-158 s with stable-diffusion.cpp under similar load); WAI v16 54.5 s including its load.
 
+## Round 7 (2026-11-20): 3×3 convolutions on the M5's neural accelerators
+
+The M5's GPU has a neural accelerator in every core. MLX 0.31 uses them (its "NAX" kernels, macOS 26.2+) for
+matrix multiplies, quantized matmuls and attention, so WAI-ANIMA's model and text encoder and the SDXL
+attention/linear layers already run on them. MLX's 3×3 `conv2d` doesn't: it uses implicit-GEMM or Winograd
+kernels. (The separate 16-core Neural Engine is out of MLX's reach; only Core ML can use it, and on a Max-class
+chip it is far slower than the GPU for models this size.)
+
+`waigen-cli --bench-conv` times three ways of running the 3×3 convolutions of the real models and measures
+each against a float32 reference (fp16 / bf16 as the models run):
+
+| Layer (batch as run) | conv2d | im2col + 1 matmul | 9 shifted matmuls | error vs float32: conv2d / 9 matmuls |
+|---|---|---|---|---|
+| SDXL UNet 1024×1344, 320 ch | **1.64 ms** | 3.07 ms | 4.35 ms | 0.0048 (Winograd) / - |
+| SDXL UNet 1024×1344, 640 ch | **1.62 ms** | 2.22 ms | 2.90 ms | 0.0050 / 0.00038 |
+| SDXL UNet 1024×1344, deepest level 1280 → 1280 | 5.84 ms | 2.14 ms | **1.95 ms (3.0×)** | 0.00014 / 0.00037 |
+| same, 2560 → 1280 / 1920 → 1280 | 11.68 / 8.78 ms | 4.62 / 3.28 ms | **3.46 / 2.90 ms (3.4× / 3.0×)** | 0.00014 / 0.00037 |
+| hi-res 1536×2016 deepest level, 1280 / 2560 in | 5.65 / 12.38 ms | 4.37 / 9.12 ms (**inf** errors at 2560) | **4.44 / 7.77 ms (1.3× / 1.6×)** | 0.0051 / 0.00038 |
+| SDXL / Qwen-Image VAE decode, 128-512 ch | **4.4-13.8 ms** | 0.3-0.5× | 0.2-0.3× | 0.038 (Winograd, bf16) |
+| Qwen-Image VAE, 96 ch at full size | 26.9 ms | 21.9 ms (1.23×; the 1536×2016 size crashed the GPU) | 37.5 ms | |
+| ESRGAN 688² tiles | **3-9 ms** | 0.4-0.8× | 0.3-0.5× | |
+
+So MLX's conv2d stays the right choice almost everywhere, except at the UNet's deepest level (few positions,
+many channels), where nine shifted matmuls on the neural accelerators are 3× faster at the base size and
+1.3-1.6× at the hi-res size, and also more precise than the Winograd kernel conv2d uses at larger sizes. The
+single big im2col matmul gave wrong values (inf) for the hi-res 2560-channel layer and crashed at the largest
+VAE size (a 9× copy over 2^31 elements), so it isn't used.
+
+`UNet.swift` now runs ResNet 3×3 convolutions with ≥ 1280 input channels at ≤ 4096 positions as nine matmuls
+(13 convolutions per step; `WAIGEN_CONV_MATMUL=0` turns it off). WAI v16, 1024×1344, 28 steps, alternating
+off / on (the Mac warming up between runs, which works against "on"): 16.22 / 16.48 → **14.46 / 14.90 s**,
+17.00 / 17.61 → **16.10 / 16.42 s**, 19.02 / 19.72 → **18.03 / 18.01 s**: **6-10 % per image**. Same picture
+(27.7 dB, Euler a amplifying the different rounding).
+
 ## Possible next steps
 
 - Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.

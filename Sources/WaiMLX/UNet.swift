@@ -152,6 +152,33 @@ class Transformer2D: Module {
     }
 }
 
+/// A 3x3 stride-1 convolution at the UNet's deepest level (>= 1280 input channels, <= 4096 positions) run as nine
+/// shifted matrix multiplies: those go through MLX's matmul, which uses the M5 GPU's neural accelerators, while
+/// MLX's conv2d kernels don't. 3.0-3.4x faster for these layers at 1024x1344 (1.3-1.6x at the hi-res size)
+/// and more precise than the Winograd conv2d picks at larger sizes (docs/PERFORMANCE.md, round 7). Everywhere
+/// else conv2d is faster and is used. Off with WAIGEN_CONV_MATMUL=0.
+let convAsMatmul = ProcessInfo.processInfo.environment["WAIGEN_CONV_MATMUL"] != "0"
+
+func conv3x3(_ conv: Conv2d, _ x: MLXArray) -> MLXArray {
+    let w = conv.weight
+    let (n, h, wd, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
+    guard convAsMatmul, w.ndim == 4, w.dim(1) == 3, w.dim(2) == 3, conv.stride == (1, 1), conv.padding == (1, 1),
+          conv.dilation == (1, 1), conv.groups == 1, c >= 1280, h * wd <= 4096
+    else { return conv(x) }
+    let o = w.dim(0)
+    let p = padded(x, widths: [0, 1, 1, 0])
+    var acc: MLXArray? = nil
+    for dy in 0 ..< 3 {
+        for dx in 0 ..< 3 {
+            let y = matmul(p[0..., dy ..< dy + h, dx ..< dx + wd, 0...].reshaped(n * h * wd, c), w[0..., dy, dx, 0...].T)
+            acc = acc.map { $0 + y } ?? y
+        }
+    }
+    var out = acc!.reshaped(n, h, wd, o)
+    if let b = conv.bias { out = out + b }
+    return out
+}
+
 class ResnetBlock2D: Module {
 
     let norm1: GroupNorm
@@ -194,7 +221,7 @@ class ResnetBlock2D: Module {
     func callAsFunction(_ x: MLXArray, timeEmbedding: MLXArray? = nil) -> MLXArray {
         var y = norm1(x)
         y = silu(y)
-        y = conv1(y)
+        y = conv3x3(conv1, y)
 
         if var timeEmbedding, let timeEmbedProjection {
             timeEmbedding = timeEmbedProjection(silu(timeEmbedding))
@@ -203,7 +230,7 @@ class ResnetBlock2D: Module {
 
         y = norm2(y)
         y = silu(y)
-        y = conv2(y)
+        y = conv3x3(conv2, y)
 
         if let convolutionShortcut {
             return y + convolutionShortcut(x)

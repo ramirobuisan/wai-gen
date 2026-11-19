@@ -38,6 +38,13 @@ func take(_ names: String...) -> String? {
     return v
 }
 
+/// A switch without a value.
+func flag(_ name: String) -> Bool {
+    guard let i = args.firstIndex(of: name) else { return false }
+    args.remove(at: i)
+    return true
+}
+
 /// ESRGAN (RRDBNet) upscaler model in MLX, x4.
 func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
     RGBImage(try RealESRGAN(url: URL(fileURLWithPath: path)).upscale(img.array))
@@ -85,6 +92,7 @@ let benchAnima = take("--bench-anima")            // WxH: Anima forward time per
 let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16
 let vaeRoundtrip = take("--vae-roundtrip")        // WAI-ANIMA: encode + decode an image with the VAE
 let esrganTest = take("--esrgan-test")            // upscale an image with --hires-upscaler and time it
+let benchConv = flag("--bench-conv")              // 3x3 convs: MLX's conv2d vs matmul rewrites (time + diff)
 let makeLycoris = take("--make-test-lycoris")     // dir: synthetic LoHa / LoKr / LoRA files for WAI-ANIMA
 let repeats = take("--repeat").flatMap(Int.init) ?? 1
 let output = take("--output", "-o") ?? "waigen.png"
@@ -109,6 +117,85 @@ func previewSink() -> ((MLXArray) -> Void)? {
             }
         }
     }
+}
+
+if benchConv {
+    // 3x3 stride-1 convolutions as the models run them, three ways: MLX's conv2d (implicit GEMM, no neural
+    // accelerators), im2col + one matmul (9x the input in memory, matmul on the GPU's neural accelerators)
+    // and nine shifted matmuls accumulated (no 9x copy, nine smaller matmuls)
+    func im2col(_ x: MLXArray, _ w: MLXArray) -> MLXArray {
+        let (n, h, wd, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3)), o = w.dim(0)
+        let p = padded(x, widths: [0, 1, 1, 0])
+        var cols: [MLXArray] = []
+        for dy in 0 ..< 3 { for dx in 0 ..< 3 { cols.append(p[0..., dy ..< dy + h, dx ..< dx + wd, 0...]) } }
+        let col = concatenated(cols, axis: -1).reshaped(n * h * wd, 9 * c)
+        return matmul(col, w.reshaped(o, 9 * c).T).reshaped(n, h, wd, o)
+    }
+    func nineMatmuls(_ x: MLXArray, _ w: MLXArray) -> MLXArray {
+        let (n, h, wd, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3)), o = w.dim(0)
+        let p = padded(x, widths: [0, 1, 1, 0])
+        var acc: MLXArray? = nil
+        for dy in 0 ..< 3 {
+            for dx in 0 ..< 3 {
+                let tap = p[0..., dy ..< dy + h, dx ..< dx + wd, 0...].reshaped(n * h * wd, c)
+                let y = matmul(tap, w[0..., dy, dx, 0...].T)
+                acc = acc.map { $0 + y } ?? y
+            }
+        }
+        return acc!.reshaped(n, h, wd, o)
+    }
+    func time(_ f: () -> MLXArray, runs: Int) -> Double {
+        eval(f())   // warm-up (kernel compile, allocation)
+        let t = Date()
+        for _ in 0 ..< runs { eval(f()) }
+        return Date().timeIntervalSince(t) / Double(runs)
+    }
+    // (label, N, H, W, Cin, Cout, dtype)
+    let shapes: [(String, Int, Int, Int, Int, Int, DType)] = ProcessInfo.processInfo.environment["WAIGEN_CONV_SET"] == "low" ? [
+        ("UNet 1024x1344 lowest res, 1280 -> 1280", 2, 42, 32, 1280, 1280, .float16),
+        ("UNet 1024x1344 lowest res, 2560 -> 1280", 2, 42, 32, 2560, 1280, .float16),
+        ("UNet 1024x1344 lowest res, 1920 -> 1280", 2, 42, 32, 1920, 1280, .float16),
+        ("UNet 1024x1344, 640 res, 1920 -> 640", 2, 84, 64, 1920, 640, .float16),
+        ("UNet 1024x1344, 640 res, 1280 -> 640", 2, 84, 64, 1280, 640, .float16),
+        ("UNet 832x1216 lowest res, 1280 -> 1280", 2, 38, 26, 1280, 1280, .float16),
+        ("UNet hi-res 1536x2016 lowest res, 1280 -> 1280", 2, 63, 48, 1280, 1280, .float16),
+        ("UNet hi-res 1536x2016 lowest res, 2560 -> 1280", 2, 63, 48, 2560, 1280, .float16),
+        ("UNet face 1024x1024 lowest res, 1280 -> 1280", 2, 32, 32, 1280, 1280, .float16),
+        ("UNet 1024x1344 2nd level, 640 -> 640 (control)", 2, 84, 64, 640, 640, .float16),
+    ] : [
+        ("SDXL UNet 1024x1344, 320 ch", 2, 168, 128, 320, 320, .float16),
+        ("SDXL UNet 1024x1344, 640 ch", 2, 84, 64, 640, 640, .float16),
+        ("SDXL UNet 1024x1344, 1280 ch", 2, 42, 32, 1280, 1280, .float16),
+        ("SDXL UNet hi-res 1536x2016, 320 ch", 2, 252, 192, 320, 320, .float16),
+        ("SDXL VAE decode 1024x1344, 512 ch @ 1/4", 1, 336, 256, 512, 512, .bfloat16),
+        ("SDXL VAE decode 1024x1344, 256 ch @ 1/2", 1, 672, 512, 256, 256, .bfloat16),
+        ("SDXL VAE decode 1024x1344, 128 ch @ full", 1, 1344, 1024, 128, 128, .bfloat16),
+        ("Qwen-Image VAE decode, 384 ch @ 1/4", 1, 336, 256, 384, 384, .bfloat16),
+        ("Qwen-Image VAE decode, 96 ch @ full", 1, 1344, 1024, 96, 96, .bfloat16),
+        ("ESRGAN tile 688x688, 64 -> 32", 1, 688, 688, 64, 32, .float16),
+        ("ESRGAN tile 688x688, 160 -> 32", 1, 688, 688, 160, 32, .float16),
+        ("ESRGAN tile 688x688, 192 -> 64", 1, 688, 688, 192, 64, .float16),
+    ]
+    MLXRandom.seed(1)
+    print("shape | conv2d | im2col+matmul | 9 matmuls | mean |error| vs float32: conv2d / im2col / 9 matmuls")
+    for (label, n, h, wd, c, o, dt) in shapes {
+        let x = MLXRandom.normal([n, h, wd, c]).asType(dt)
+        let w = (MLXRandom.normal([o, 3, 3, c]) * (1 / Float(9 * c).squareRoot())).asType(dt)
+        // float32 reference through im2col + a float32 matmul (no Winograd)
+        let exact = im2col(x.asType(.float32), w.asType(.float32))
+        let d1 = abs(conv2d(x, w, padding: 1).asType(.float32) - exact).mean().item(Float.self)
+        let d2 = abs(im2col(x, w).asType(.float32) - exact).mean().item(Float.self)
+        let d3 = abs(nineMatmuls(x, w).asType(.float32) - exact).mean().item(Float.self)
+        Memory.clearCache()
+        let runs = h * wd > 300_000 ? 5 : 20
+        let t0 = time({ conv2d(x, w, padding: 1) }, runs: runs)
+        let t1 = time({ im2col(x, w) }, runs: runs)
+        let t2 = time({ nineMatmuls(x, w) }, runs: runs)
+        print(String(format: "%@ | %.2f ms | %.2f ms (%.2fx) | %.2f ms (%.2fx) | %.3g / %.3g / %.3g", label, t0 * 1000,
+                     t1 * 1000, t0 / t1, t2 * 1000, t0 / t2, d1, d2, d3))
+        Memory.clearCache()
+    }
+    finish(0)
 }
 
 if let makeLycoris {

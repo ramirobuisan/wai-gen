@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-20 (late night)
+
+- WAI v16: the UNet's deepest-level 3×3 convolutions run as nine matrix multiplies, which use the M5 GPU's neural
+  accelerators (MLX's conv2d doesn't): 3× faster for those layers, 6-10 % per image, same picture.
+  `WAIGEN_CONV_MATMUL=0` turns it off; `waigen-cli --bench-conv` measures every convolution size (round 7).
+
 ## 2026-11-20 (night)
 
 - stable-diffusion.cpp removed: WAI-ANIMA runs end to end in Swift + MLX (`WaiAnima`: Philox noise, flow
