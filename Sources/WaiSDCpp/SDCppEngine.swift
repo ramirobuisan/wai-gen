@@ -150,9 +150,16 @@ private func check(_ status: sd_status_t, _ what: String) throws {
     if status != SD_STATUS_OK { throw SDCppError.setup("\(what): \(lastError())") }
 }
 
+/// WAIGEN_SDCPP_LOG=info shows stable-diffusion.cpp's info lines too (its per-stage timings).
+private let showInfoLog = ProcessInfo.processInfo.environment["WAIGEN_SDCPP_LOG"] == "info"
+
 private let installLogger: Void = {
     sd_set_log_callback({ level, text, _ in
         guard let text else { return }
+        if showInfoLog, level.rawValue >= SD_LOG_INFO.rawValue {
+            FileHandle.standardError.write(Data("[sd.cpp] \(String(cString: text))".utf8))
+            return
+        }
         let line = String(cString: text)
         // warnings, plus the step cache's one-line summaries ("EasyCache skipped 6/25 steps ...")
         let cacheInfo = ["EasyCache", "UCache", "CacheDIT", "Spectrum"].contains { line.contains($0) }

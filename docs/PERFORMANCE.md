@@ -305,7 +305,11 @@ A turbo / few-step distilled LoRA for WAI v16 was left out on purpose: it change
 
 ## Possible next steps
 
-- The Qwen3 text encoder of WAI-ANIMA and the face detector still run in stable-diffusion.cpp; both take well under
-  a second, so there is little left to gain there.
+- The Qwen3 text encoder of WAI-ANIMA and the face detector still run in stable-diffusion.cpp. Measured
+  (`WAIGEN_SDCPP_LOG=info` prints stable-diffusion.cpp's stage timings): the text encoder takes **0.26 s** for prompt
+  + negative the first time and ~0 s after that (stable-diffusion.cpp caches the last 4 encodings, so the hi-res
+  and face-repair passes reuse it); the YOLOv8 face detector takes **0.26 s** per image (the WAI-ANIMA face repair
+  runs it twice, once to pick the repaint size). Against a 76 s WAI-ANIMA job that is under 1 %, so porting them
+  to MLX isn't worth it.
 - What remains is mostly the models' own compute. Fewer model calls (Fast mode, Step cache, or both) is the
   remaining lever; they stack, but each changes the picture a little.
