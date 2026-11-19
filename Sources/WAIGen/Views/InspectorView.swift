@@ -77,6 +77,11 @@ struct InspectorView: View {
                     Text("\(preset.defaults.fast.sampler.label) · \(preset.defaults.fast.scheduler.label) · \(preset.defaults.fast.steps) steps: about 30 % faster, a slightly different look")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Step cache", isOn: $model.settings.stepCache)
+                    Text("Reuses the model's output on steps where it barely changes: about 25 % faster, nearly the same image")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                     .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
             }
 

@@ -34,6 +34,8 @@ struct GenerationSettings: Codable, Equatable {
     var livePreview = true
     /// use the preset's fast sampler / step count instead of the ones above
     var fastMode = false
+    /// skip model calls on steps that would barely change the image (EasyCache, see docs/PERFORMANCE.md)
+    var stepCache = false
 
     /// Hi-res upscaler model in models/upscale_models ("" = built-in bicubic / Lanczos).
     var hiresUpscaler = "RealESRGAN_x4plus_anime_6B.pth"

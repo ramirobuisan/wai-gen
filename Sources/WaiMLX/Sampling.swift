@@ -173,3 +173,59 @@ struct StepPreview {
     let make: (MLXArray) -> MLXArray
     let deliver: (MLXArray) -> Void
 }
+
+/// Step cache ("EasyCache", the rule stable-diffusion.cpp uses for its `easycache` mode): between two
+/// steps the model's output moves roughly in proportion to its input, at a rate measured on the steps
+/// that are computed. While the predicted relative change of the output, accumulated since the last
+/// computed step, stays under `threshold`, the step reuses the last output's offset from its input
+/// (output ≈ input + (lastOutput - lastInput)) instead of running the model. Only steps between
+/// `start` and `end` (fractions of the schedule) can be skipped; the first and last ones always run.
+final class StepCache {
+    let threshold: Float
+    private let startSigma: Float
+    private let endSigma: Float
+    private var lastInput: MLXArray?
+    private var lastOutput: MLXArray?
+    private var offset: MLXArray?
+    private var rate: Float?
+    private var outputNorm: Float = 0
+    private var accumulated: Float = 0
+    private(set) var skipped = 0
+
+    init(threshold: Float, sigmas: [Float], start: Float = 0.15, end: Float = 0.95) {
+        self.threshold = threshold
+        let n = max(sigmas.count - 1, 1)
+        startSigma = sigmas[min(Int(start * Float(n)), n - 1)]
+        endSigma = sigmas[min(Int(end * Float(n)), n - 1)]
+    }
+
+    /// `input`: the model input for this step (float32); `compute` runs the model on it.
+    func callAsFunction(_ input: MLXArray, sigma: Float, compute: () -> MLXArray) -> MLXArray {
+        guard sigma <= startSigma, sigma > endSigma else { return compute() }
+        var inputChange: Float? = nil
+        if let lastInput {
+            let change = abs(input - lastInput).mean().item(Float.self)
+            inputChange = change
+            if let rate, let offset, outputNorm > 0 {
+                accumulated += rate * change / outputNorm
+                if accumulated < threshold {
+                    skipped += 1
+                    return input + offset
+                }
+            }
+        }
+        let output = compute().asType(.float32)
+        let outputChange = lastOutput.map { abs(output - $0).mean() }
+        let norm = abs(output).mean()
+        eval(output, norm)
+        if let inputChange, inputChange > 0, let oc = outputChange?.item(Float.self), oc > 0, oc.isFinite {
+            rate = oc / inputChange
+        }
+        outputNorm = norm.item(Float.self)
+        lastInput = input
+        lastOutput = output
+        offset = output - input
+        accumulated = 0
+        return output
+    }
+}

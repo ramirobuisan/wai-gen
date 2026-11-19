@@ -98,7 +98,12 @@ let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (defaul
 let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
 let ditEngine = take("--dit-engine") ?? "mlx"      // WAI-ANIMA diffusion model: mlx (default) or sdcpp
 let benchAnima = take("--bench-anima")             // WxH: MLX Anima forward time, compile off/on, adapter share
+let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16   // MLX Anima weights: bf16 (default) or f16
 let vaeRoundtrip = take("--vae-roundtrip")         // encode + decode an image with the MLX VAE and exit
+let stepCache = take("--cache").map { a -> SDCppStepCache in    // WAI-ANIMA: sd.cpp step cache, mode[:k=v,...]
+    guard let c = SDCppStepCache(argument: a) else { fail("--cache: use mode or mode:key=value,key=value") }
+    return c
+}
 let esrganTest = take("--esrgan-test")             // upscale an image with --hires-upscaler in MLX and sd.cpp, compare
 
 /// Read an image file as RGB8 (exact size).
@@ -120,6 +125,11 @@ func loadRGB(_ path: String) -> RGBImage? {
 let faceDetector = take("--face-repair")   // path to face_yolov8m.safetensors
 let faceEngine = take("--face-engine") ?? "mlx"   // face repainting for SDXL: mlx (default) or sdcpp
 let faceStrength = take("--face-strength").flatMap(Float.init) ?? 0.4
+let sdxlStepCache = take("--step-cache").flatMap(Float.init)   // WAI Illustrious: MLX step cache threshold
+let detailOnly = take("--detail-only")   // WAI-ANIMA: run only the face repair on this image
+let faceSize = take("--face-size").flatMap(Int.init)     // WAI-ANIMA face repair: repaint size (default 1024)
+let faceSteps = take("--face-steps").flatMap(Int.init)   // WAI-ANIMA face repair: schedule length (default --steps)
+let faceCache = take("--face-cache").flatMap(SDCppStepCache.init(argument:))   // step cache for the face repaint
 let repeats = take("--repeat").flatMap(Int.init) ?? 1
 let output = take("--output", "-o") ?? "waigen.png"
 if !args.isEmpty { fail("unknown arguments: \(args)") }
@@ -165,7 +175,7 @@ if let diffusionPath {
         let wh = benchAnima.split(separator: "x").compactMap { Int($0) }
         guard wh.count == 2 else { fail("--bench-anima WxH") }
         do {
-            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath))
+            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType)
             for (b, c) in [(1, false), (2, false), (1, false), (2, false)] {
                 let r = dit.benchmark(width: wh[0], height: wh[1], batch: b, compiled: c)
                 print(String(format: "%dx%d batch %d compile %@: %.3f s per forward per sample (adapter %.4f s)", wh[0], wh[1], b,
@@ -211,7 +221,7 @@ if let diffusionPath {
         if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
         if ditEngine == "mlx" {
             let td = Date()
-            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath))
+            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType)
             if !loras.isEmpty {
                 let r = try dit.setLoRAs(loras)
                 print("MLX Anima LoRA: \(r.applied) layers, \(r.unmatched.count) unmatched")
@@ -241,6 +251,7 @@ if let diffusionPath {
             p.sampler = samplerName ?? "euler_a"
             p.seed = Int64(truncatingIfNeeded: seed)
             p.initImage = img
+            p.stepCache = stepCache
             p.strength = hiresDenoise ?? 0.4
             p.steps = Int((Double(hiresSteps ?? 20) / Double(p.strength)).rounded(.up))
             let out = try engine.generate(p) { stage, done, total in if total > 0 { showProgress(stage, Int(done), Int(total)) } }
@@ -248,6 +259,36 @@ if let diffusionPath {
             try Image(MLXArray(out.pixels, [out.height, out.width, 3], type: UInt8.self)).save(url: outputURL(1))
             print(String(format: "refine -> %dx%d in %.2fs -> %@", out.width, out.height, Date().timeIntervalSince(ts),
                          outputURL(1).lastPathComponent))
+        } catch { fail(error.localizedDescription) }
+        finish(0)
+    }
+
+    if let detailPath = detailOnly {
+        // face repair alone on an existing image (WAI-ANIMA), to time and compare its settings
+        guard let img = loadRGB(detailPath), let faceDetector else { fail("--detail-only needs an image and --face-repair") }
+        do {
+            let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
+            for run in 1 ... repeats {
+                let tf = Date()
+                var dp = SDCppDetailParameters(prompt: prompt)
+                dp.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }
+                dp.negativePrompt = negative
+                dp.steps = faceSteps ?? steps ?? 25
+                dp.cfg = cfg ?? 4.5
+                if let samplerName { dp.sampler = samplerName }
+                dp.scheduler = schedulerName
+                dp.seed = Int64(truncatingIfNeeded: seed)
+                dp.strength = faceStrength
+                if let faceSize { dp.inpaintSize = faceSize }
+                dp.stepCache = faceCache
+                let fixed = try engine.detail(img, detector: detector, dp) { _, done, total in
+                    if total > 0 { showProgress("face", Int(done), Int(total)) }
+                }
+                FileHandle.standardError.write(Data("\n".utf8))
+                try Image(MLXArray(fixed.pixels, [fixed.height, fixed.width, 3], type: UInt8.self)).save(url: outputURL(run))
+                print(String(format: "face repair %.2fs (size %d, %d steps x %.2f) -> %@", Date().timeIntervalSince(tf),
+                             dp.inpaintSize, dp.steps, dp.strength, outputURL(run).lastPathComponent))
+            }
         } catch { fail(error.localizedDescription) }
         finish(0)
     }
@@ -267,16 +308,42 @@ if let diffusionPath {
         if let hiresSteps { p.hiresSteps = hiresSteps }
         if let hiresDenoise { p.hiresDenoise = hiresDenoise }
         p.hiresModelPath = hiresUpscalerPath
+        p.stepCache = stepCache
         let ts = Date()
         do {
             let img = try engine.generate(p) { stage, done, total in
                 if total > 0 { showProgress(stage, Int(done), Int(total)) }
             }
             FileHandle.standardError.write(Data("\n".utf8))
-            let array = MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self)
+            var final = img
+            var faceLine = ""
+            if let faceDetector {
+                // like the app: sd.cpp's ADetailer with this context (MLX model and VAE through the hooks)
+                try Image(MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self))
+                    .save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
+                let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
+                let tf = Date()
+                var dp = SDCppDetailParameters(prompt: prompt)
+                dp.loras = p.loras
+                dp.negativePrompt = negative
+                dp.steps = faceSteps ?? p.steps
+                dp.cfg = p.cfg
+                dp.sampler = p.sampler
+                dp.scheduler = p.scheduler
+                dp.seed = p.seed
+                dp.strength = faceStrength
+                if let faceSize { dp.inpaintSize = faceSize }
+                dp.stepCache = faceCache
+                final = try engine.detail(img, detector: detector, dp) { _, done, total in
+                    if total > 0 { showProgress("face", Int(done), Int(total)) }
+                }
+                FileHandle.standardError.write(Data("\n".utf8))
+                faceLine = String(format: " | face repair %.2fs", Date().timeIntervalSince(tf))
+            }
+            let array = MLXArray(final.pixels, [final.height, final.width, 3], type: UInt8.self)
             try Image(array).save(url: outputURL(run))
-            print(String(format: "run %d seed %lld | %dx%d | total %.2fs -> %@", run, p.seed, img.width,
-                         img.height, Date().timeIntervalSince(ts), outputURL(run).lastPathComponent))
+            print(String(format: "run %d seed %lld | %dx%d | total %.2fs%@ -> %@", run, p.seed, img.width,
+                         img.height, Date().timeIntervalSince(ts), faceLine, outputURL(run).lastPathComponent))
         } catch { fail(error.localizedDescription) }
     }
 } else {
@@ -298,6 +365,7 @@ if let diffusionPath {
     }
     if let hires { params.hiresScale = hires }
     if let hiresSteps { params.hiresSteps = hiresSteps }
+    params.stepCache = sdxlStepCache
     if let hiresDenoise { params.hiresDenoise = hiresDenoise }
 
     let tLoad = Date()
@@ -442,6 +510,7 @@ if let diffusionPath {
                 line += String(format: " | hires %d steps %.2fs (%.3f s/it)", t.hiresSteps, t.hiresSampling,
                                t.hiresSampling / Double(t.hiresSteps))
             }
+            if t.skippedSteps > 0 { line += " | cache skipped \(t.skippedSteps)" }
             line += String(format: " | decode %.2fs | total %.2fs -> %@", t.decode, t.total, outputURL(run).lastPathComponent)
             print(line)
         } catch { fail(error.localizedDescription) }

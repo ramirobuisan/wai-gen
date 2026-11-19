@@ -37,8 +37,50 @@ private func setLoRAs(_ opt: OpaquePointer, _ loras: [SDCppLoRA]) throws {
     try check(sd_opt_set_loras(opt, "loras", &list, list.count), "loras")
 }
 
+/// stable-diffusion.cpp's step cache ("cache.mode" plus its "cache.*" knobs). Step-level modes
+/// (easycache, spectrum) skip whole model calls, so they also work with an external diffusion model.
+public struct SDCppStepCache: Sendable, Equatable {
+    /// easycache, spectrum, taylorseer, dbcache, cache_dit, ucache
+    public var mode: String
+    /// keys without the "cache." prefix, e.g. ["reuse_threshold": 0.2] or ["spectrum_warmup_steps": 4]
+    public var options: [String: Double]
+    public init(mode: String, options: [String: Double] = [:]) {
+        self.mode = mode
+        self.options = options
+    }
+
+    /// "mode" or "mode:key=value,key=value"
+    public init?(argument: String) {
+        let parts = argument.split(separator: ":", maxSplits: 1)
+        guard let mode = parts.first.map(String.init), !mode.isEmpty else { return nil }
+        var options = [String: Double]()
+        if parts.count > 1 {
+            for kv in parts[1].split(separator: ",") {
+                let pair = kv.split(separator: "=")
+                guard pair.count == 2, let v = Double(pair[1]) else { return nil }
+                options[String(pair[0])] = v
+            }
+        }
+        self.init(mode: mode, options: options)
+    }
+}
+
+private func setStepCache(_ opt: OpaquePointer, _ cache: SDCppStepCache?) throws {
+    guard let cache, cache.mode != "disabled" else { return }
+    try check(sd_opt_set_string(opt, "cache.mode", cache.mode), "cache.mode")
+    for (k, v) in cache.options.sorted(by: { $0.key < $1.key }) {
+        let key = "cache." + k
+        // the options are typed: try float, then int, then bool
+        if sd_opt_set_float(opt, key, v) == SD_STATUS_OK { continue }
+        if v == v.rounded(), sd_opt_set_int(opt, key, Int64(v)) == SD_STATUS_OK { continue }
+        try check(sd_opt_set_bool(opt, key, v != 0), key)
+    }
+}
+
 public struct SDCppParameters: Sendable {
     public var loras: [SDCppLoRA] = []
+    /// nil = no step cache
+    public var stepCache: SDCppStepCache? = nil
     /// img2img: start from this image (must already be width x height); `strength` = denoise.
     public var initImage: RGBImage? = nil
     public var strength: Float = 0.4
@@ -67,6 +109,7 @@ public struct SDCppParameters: Sendable {
 /// ADetailer pass settings (detect faces, repaint each crop).
 public struct SDCppDetailParameters: Sendable {
     public var loras: [SDCppLoRA] = []
+    public var stepCache: SDCppStepCache? = nil
     public var prompt: String
     public var negativePrompt = ""
     public var steps = 20
@@ -109,8 +152,12 @@ private func check(_ status: sd_status_t, _ what: String) throws {
 
 private let installLogger: Void = {
     sd_set_log_callback({ level, text, _ in
-        guard level.rawValue >= SD_LOG_WARN.rawValue, let text else { return }
-        FileHandle.standardError.write(Data("[sd.cpp] \(String(cString: text))".utf8))
+        guard let text else { return }
+        let line = String(cString: text)
+        // warnings, plus the step cache's one-line summaries ("EasyCache skipped 6/25 steps ...")
+        let cacheInfo = ["EasyCache", "UCache", "CacheDIT", "Spectrum"].contains { line.contains($0) }
+        guard level.rawValue >= SD_LOG_WARN.rawValue || cacheInfo else { return }
+        FileHandle.standardError.write(Data("[sd.cpp] \(line)".utf8))
     }, nil)
 }()
 
@@ -410,6 +457,7 @@ public final class SDCppEngine: @unchecked Sendable {
         try check(sd_opt_set_string(opt, "sample.method", p.sampler), "sample.method")
         if let s = p.scheduler { try check(sd_opt_set_string(opt, "sample.scheduler", s), "sample.scheduler") }
         try setLoRAs(opt, p.loras)
+        try setStepCache(opt, p.stepCache)
         if let initImage = p.initImage {
             var shape: [Int64] = [3, Int64(initImage.width), Int64(initImage.height)]
             let tensor = initImage.pixels.withUnsafeBytes { buf in
@@ -469,6 +517,7 @@ public final class SDCppEngine: @unchecked Sendable {
         if let s = p.scheduler { try check(sd_opt_set_string(opt, "sample.scheduler", s), "sample.scheduler") }
         try check(sd_opt_set_float(opt, "strength", Double(p.strength)), "strength")
         try setLoRAs(opt, p.loras)
+        try setStepCache(opt, p.stepCache)
         let args = "confidence=\(p.confidence),inpaint_width=\(p.inpaintSize),inpaint_height=\(p.inpaintSize),"
             + "inpaint_padding=\(p.padding),mask_blur=\(p.maskBlur)"
         try check(sd_opt_set_string(opt, "adetail.args", args), "adetail.args")

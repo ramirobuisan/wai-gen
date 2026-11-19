@@ -33,6 +33,8 @@ struct GenerationRecord: Codable, Hashable {
     /// set on images made with the gallery's Upscale action
     var upscaledFrom: String? = nil
     var upscaleDetailPass: Bool? = nil
+    /// true when made with the step cache (EasyCache) on
+    var stepCache: Bool? = nil
 
     /// A1111-style "parameters" text (with ADetailer's key names), readable by other tools.
     var parametersText: String {
@@ -51,6 +53,7 @@ struct GenerationRecord: Codable, Hashable {
             s += ", ADetailer denoising strength: \(fs)"
             if let fp = faceRepairPrompt { s += ", ADetailer prompt: \"\(fp.replacingOccurrences(of: "\"", with: "\\\""))\"" }
         }
+        if stepCache == true { s += ", Step cache: EasyCache" }
         if let src = upscaledFrom { s += ", Upscaled from: \(src)\(upscaleDetailPass == false ? " (upscaler only)" : "")" }
         s += ", Engine: \(engine), Version: WAI Gen"
         return s

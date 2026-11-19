@@ -107,7 +107,8 @@ extension WaiSDXL {
         let tEnc = max(1, Int(Float(p.steps) * strength))
         let sigmas = Array(full.suffix(tEnc + 1))
         let x = x0 + MLXRandom.normal(x0.shape) * sigmas[0]
-        let base = denoiser(context: cond.0, pooled: cond.1, cfg: p.cfg, width: w, height: h)
+        let cache = p.stepCache.map { StepCache(threshold: $0, sigmas: sigmas) }
+        let base = denoiser(context: cond.0, pooled: cond.1, cfg: p.cfg, width: w, height: h, cache: cache)
         let masked: Denoiser = { x, sigma in base(x, sigma) * m + x0 * (1 - m) }
         guard let latent = sample(p.sampler, denoise: masked, x: x, sigmas: sigmas, isCancelled: isCancelled,
                                   preview: nil, progress: progress)

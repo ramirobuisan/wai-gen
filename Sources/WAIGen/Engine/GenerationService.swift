@@ -48,6 +48,8 @@ struct GenerationJob: Identifiable, Sendable {
     /// ESRGAN-family model for the hi-res upscale; nil = built-in resize
     let hiresUpscaler: URL?
     let livePreview: Bool
+    /// EasyCache step skipping (GenerationService.sdxlStepCache / animaStepCache)
+    var stepCache = false
     var upscale: UpscaleRequest? = nil
 }
 
@@ -419,8 +421,16 @@ final class GenerationService: @unchecked Sendable {
             sp.hiresSteps = h.steps
             sp.hiresDenoise = Float(h.denoise)
         }
+        if job.stepCache { sp.stepCache = Self.sdxlStepCache }
         return sp
     }
+
+    /// Step cache settings measured in docs/PERFORMANCE.md (round 4): the most steps skipped while the
+    /// image stays visibly the same.
+    static let sdxlStepCache: Float = 0.5
+    static let animaStepCache = SDCppStepCache(mode: "easycache", options: ["reuse_threshold": 0.5])
+    /// WAI-ANIMA face repaint size when every face crop fits in it.
+    static let animaFaceSize = 768
 
     private func sdcppParameters(_ job: GenerationJob) -> SDCppParameters {
         var sp = SDCppParameters(prompt: job.positive)
@@ -433,6 +443,7 @@ final class GenerationService: @unchecked Sendable {
         sp.sampler = job.sampler.sdcppName
         sp.scheduler = job.scheduler.sdcppName
         sp.seed = job.seed
+        if job.stepCache { sp.stepCache = Self.animaStepCache }
         return sp
     }
 
@@ -568,7 +579,14 @@ final class GenerationService: @unchecked Sendable {
         let engine = try sdcppEngine(job, progress)
         setActive(engine)
         defer { setActive(nil) }
+        // WAI-ANIMA repaints the face crop at 768 px unless a face crop is bigger than that (close-ups): half the
+        // time of 1024 px and the same look at the size the face is pasted back (docs/PERFORMANCE.md, round 4)
+        let faces = try detector.detect(image, confidence: Float(fr.confidence))
+        guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
+        let largestCrop = faces.map { max($0.x2 - $0.x1, $0.y2 - $0.y1) }.max().map { Int($0) + 2 * 32 + 4 } ?? 0
         var dp = SDCppDetailParameters(prompt: fr.prompt.isEmpty ? job.positive : fr.prompt)
+        dp.inpaintSize = largestCrop > Self.animaFaceSize ? 1024 : Self.animaFaceSize
+        if job.stepCache { dp.stepCache = Self.animaStepCache }
         dp.loras = job.loras.map { SDCppLoRA(path: $0.url.path, multiplier: Float($0.strength)) }
         dp.negativePrompt = job.negative
         dp.steps = job.steps

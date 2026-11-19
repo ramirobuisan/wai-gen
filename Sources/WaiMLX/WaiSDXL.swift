@@ -20,6 +20,9 @@ public struct SDXLParameters: Sendable {
     public var hiresScale: Float? = nil
     public var hiresSteps = 15
     public var hiresDenoise: Float = 0.4
+    /// Step cache threshold (see `StepCache`): skips model calls on steps that would barely change the
+    /// prediction. nil = off; 0.5 skips ~8 of 28 steps with a nearly identical image (docs/PERFORMANCE.md).
+    public var stepCache: Float? = nil
 
     public init(prompt: String) { self.prompt = prompt }
 }
@@ -31,6 +34,8 @@ public struct GenerationTimings: Sendable {
     public var samplingSteps = 0
     public var hiresSampling: Double = 0
     public var hiresSteps = 0
+    /// model calls the step cache skipped (base + hi-res)
+    public var skippedSteps = 0
     public var decode: Double = 0
     public var total: Double = 0
 }
@@ -123,11 +128,13 @@ public final class WaiSDXL {
         let x = noise * (1 + sigmas[0] * sigmas[0]).squareRoot()   // EPS max-denoise noise scaling
 
         var ts = Date()
+        let cache = p.stepCache.map { StepCache(threshold: $0, sigmas: sigmas) }
         guard var latent = sample(
             p.sampler,
-            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8),
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8, cache: cache),
             x: x, sigmas: sigmas, isCancelled: isCancelled, preview: stepPreview, progress: { progress(.sample, $0, $1) })
         else { throw WaiCancelled() }
+        tm.skippedSteps += cache?.skipped ?? 0
         tm.sampling = Date().timeIntervalSince(ts)
         tm.samplingSteps = p.steps
 
@@ -137,9 +144,11 @@ public final class WaiSDXL {
             let hw = Int((Float(w8) * scale / 8).rounded()) * 8
             let hh = Int((Float(h8) * scale / 8).rounded()) * 8
             let image = vae.decode(latent.asType(vaeDType)).asType(.float32)   // [-1, 1], NHWC
+            var skipped = 0
             latent = try refinePass(
                 image, context: context, pooled: pooled, p, width: hw, height: hh, upscale: hiresUpscale,
-                isCancelled: isCancelled, preview: stepPreview, progress: progress)
+                isCancelled: isCancelled, preview: stepPreview, progress: progress, skipped: &skipped)
+            tm.skippedSteps += skipped
             tm.hiresSampling = Date().timeIntervalSince(ts)
             tm.hiresSteps = p.hiresSteps
         }
@@ -179,9 +188,10 @@ public final class WaiSDXL {
                 deliver: deliver)
         }
         let src = image.asType(.float32)[.newAxis] / 127.5 - 1      // [-1, 1], NHWC
+        var skipped = 0
         let latent = try refinePass(
             src, context: context, pooled: pooled, p, width: width / 8 * 8, height: height / 8 * 8, upscale: upscale,
-            isCancelled: isCancelled, preview: stepPreview, progress: progress)
+            isCancelled: isCancelled, preview: stepPreview, progress: progress, skipped: &skipped)
         progress(.decode, 0, 1)
         let img = vae.decode(latent.asType(vaeDType)).asType(.float32)
         let out = (clip(img / 2 + 0.5, min: 0, max: 1) * 255).round().asType(.uint8)[0]
@@ -204,7 +214,7 @@ public final class WaiSDXL {
     private func refinePass(
         _ image: MLXArray, context: MLXArray, pooled: MLXArray, _ p: SDXLParameters, width hw: Int, height hh: Int,
         upscale: HiresUpscaler?, isCancelled: () -> Bool, preview: StepPreview?,
-        progress: (GenerationPhase, Int, Int) -> Void
+        progress: (GenerationPhase, Int, Int) -> Void, skipped: inout Int
     ) throws -> MLXArray {
         var image = image
         if let upscale {
@@ -217,11 +227,13 @@ public final class WaiSDXL {
         let full = schedule.sigmas(steps: total, scheduler: p.scheduler)
         let hs = Array(full.suffix(p.hiresSteps + 1))
         let xh = x0 + MLXRandom.normal(x0.shape) * hs[0]
+        let cache = p.stepCache.map { StepCache(threshold: $0, sigmas: hs) }
         guard let latent = sample(
             p.sampler,
-            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: hw, height: hh),
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: hw, height: hh, cache: cache),
             x: xh, sigmas: hs, isCancelled: isCancelled, preview: preview, progress: { progress(.hires, $0, $1) })
         else { throw WaiCancelled() }
+        skipped = cache?.skipped ?? 0
         return latent
     }
 
@@ -257,7 +269,9 @@ public final class WaiSDXL {
     }
 
     /// CFG denoiser around the UNet (eps prediction -> denoised latent).
-    func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int) -> Denoiser {
+    /// `cache`: EasyCache step skipping on the UNet output (see `StepCache`).
+    func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int,
+                  cache: StepCache? = nil) -> Denoiser {
         let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
             .reshaped(1, 6)
         let textTime = (pooled, tiled(ids, repetitions: [2, 1]).asType(dtype))
@@ -270,8 +284,13 @@ public final class WaiSDXL {
             let t = schedule.timestep(sigma)
             let xIn = (concatenated([x, x], axis: 0) * cIn).asType(dtype)
             let timesteps = MLXArray([t, t])
-            let eps = compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
-                ?? unet(xIn, timestep: timesteps, encoderX: context, textTime: textTime)
+            let run = {
+                compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
+                    ?? unet(xIn, timestep: timesteps, encoderX: context, textTime: textTime)
+            }
+            // the cache sees the scaled input in float32 (as stable-diffusion.cpp's does); without it the
+            // graph is exactly the uncached one
+            let eps = cache.map { $0(xIn.asType(.float32), sigma: sigma, compute: run) } ?? run()
             let (epsC, epsU) = eps.split()
             let e = (epsU + cfg * (epsC - epsU)).asType(x.dtype)
             return x - sigma * e

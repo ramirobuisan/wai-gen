@@ -22,6 +22,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw
 - LoRAs for both engines (merged into the MLX models), with a warning when a LoRA was made for the other model family
 - Fast mode: a quicker sampler with fewer steps (~30 % faster, slightly different look)
+- Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-30 % faster, nearly the same image)
 - Live preview of every step (latent projection, no extra time)
 - Gallery: upscale with a detail pass or upscaler-only ×2, reuse prompt/settings/seed, info, ← / → to browse
 - Zoomable image (pinch, ⌘+ / ⌘−, double-click for 100 %, ⌘0 / ⌘9), collapsible inspector sections,
@@ -42,7 +43,9 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 | RealESRGAN x4plus anime 6B, 1024×1344 → 4096×5376 | **1.97 s** (MLX) | 27.5 s (stable-diffusion.cpp) |
 | WAI-ANIMA model, 1024×1344, per step | **1.36 s** (MLX) | 2.72 s (stable-diffusion.cpp) |
 | WAI v16 face repair, one face | **~6 s** (MLX) | 17.3 s (stable-diffusion.cpp) |
-| WAI-ANIMA 1024×1344 → 1536×2016, hi-res + face repair, in the app | **157 s** | 750 s with stable-diffusion.cpp alone |
+| WAI v16 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **31.6 s** | |
+| WAI-ANIMA face repair, one face | **~5-9 s** (768 px repaint) | ~16 s at 1024 px |
+| WAI-ANIMA 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **76 s** | 157 s before the step cache, 750 s with stable-diffusion.cpp alone |
 
 The MLX VAE and upscaler match stable-diffusion.cpp's output (PSNR 53.9 dB and 60.6 dB). They are also
 published on their own: [mlx-swift-qwen-image-vae](https://github.com/ramirobuisan/mlx-swift-qwen-image-vae)

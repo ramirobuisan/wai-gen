@@ -9,7 +9,9 @@ Apple M5 Max (128 GB), Release builds, unless noted. "Warm" = models already loa
 |---|---|---|
 | WAI v16, 1024×1344, 28 steps | ~15-17 s | UNet sampling, ~0.6 s/step (MLX) |
 | WAI v16 face repair (one face) | ~6 s (was 17.3 s) | 11 masked steps at 1024×1024 (MLX) |
-| WAI-ANIMA, 1024×1344 → 1536×2016 hi-res + face repair, cold start | **157 s** (346 s this morning, 750 s originally) | the Anima model, now in MLX: 1.36 s/step at 1024×1344 |
+| WAI v16, 1024×1344 → 1536×2016 hi-res + face repair, in the app, Step cache on | **31.6 s** | UNet sampling |
+| WAI-ANIMA, 1024×1344 → 1536×2016 hi-res + face repair, in the app, Step cache on | **76 s** (157 s before round 4, 750 s originally) | the Anima model in MLX: 1.36 s/step at 1024×1344 |
+| WAI-ANIMA face repair (one face) | ~5-9 s (was ~16 s) | 10 masked steps at 768×768 |
 
 ## Round 1: engines (2026-11-19)
 
@@ -209,8 +211,101 @@ same seed, 10 steps:
 The SDXL path was also checked with a real character LoRA (kohya, rank 32, text encoders + UNet): 1 056 layers
 applied, 0 unmatched, and the MLX face repair keeps the LoRA.
 
+## Round 4 (2026-11-20)
+
+Same order. Most of the remaining time is the models' own compute, so this round is about running them
+less often: skipping steps that barely change the image, and repainting faces at a smaller size.
+
+Note on the numbers: the Mac was in use during part of this round, so the absolute times drift (the same
+uncached WAI-ANIMA image took 33.5 s, then 43-50 s). Every comparison below is between runs made back to
+back; the number of skipped model calls doesn't depend on load.
+
+### Small: stable-diffusion.cpp's step cache for WAI-ANIMA
+
+stable-diffusion.cpp has step caches built in (`cache.mode`). The ones that work per step (`easycache`,
+`spectrum`) skip whole model calls, so they also work with the MLX Anima model behind the diffusion hook;
+the block-level ones (`dbcache`, `taylorseer`, `cache_dit`) need stable-diffusion.cpp's own model and skipped
+nothing. `SDCppParameters.stepCache` / `--cache mode[:key=value,...]` pass it through.
+
+WAI-ANIMA, 1024×1344, Euler a, 25 steps, same seed:
+
+| Setting | Model calls skipped | Time (back to back) | vs. no cache |
+|---|---|---|---|
+| none | 0 | 43.2 s / 45.1 s | |
+| `easycache` (default threshold 0.2), 0.3, `taylorseer` | 0 | same or slower | identical image |
+| **`easycache`, `reuse_threshold` 0.5** | **8 / 25** | **29.3 s / 33.5 s (−26 to −32 %)** | 21.0 dB, looks the same |
+| `easycache` 0.7 / 1.0 | 9 / 25 | 31.2 s / 26.3 s | 18.2 dB, small details move |
+| `spectrum` (defaults) | not logged | 20.9 s (quiet Mac, vs 33.5 s) | 16.4 dB, **hazy, low contrast** |
+| `spectrum`, 6 warm-up steps, flex 0 / 0.25 | 8-9 | 26.5 / 24.7 s (vs 33.5 s) | 18.0-18.2 dB, still flatter |
+
+![WAI-ANIMA: no cache / EasyCache 0.5 / spectrum](images/step-cache-wai-anima.jpg)
+
+EasyCache (the rule: between two steps the model's output moves roughly in proportion to its input, at a rate
+measured on the steps that ran; while the predicted relative change since the last computed step stays under
+the threshold, reuse the last output's offset from its input) at 0.5 is the one kept.
+
+### Medium: the same step cache for WAI v16 (MLX)
+
+`StepCache` in `Sampling.swift` ports that EasyCache rule to the MLX sampler: it sits around the UNet call in
+`WaiSDXL.denoiser` (input = the scaled latent, output = the CFG pair of eps predictions), for the base pass,
+the hi-res pass and the face repaint, each with its own cache. Off, the graph is exactly the uncached one.
+
+WAI v16, 1024×1344, Euler a, 28 steps, same seed:
+
+| Threshold | Skipped | Base pass |
+|---|---|---|
+| none | 0 | 20.2-21.5 s |
+| 0.1 / 0.2 / 0.3 | 0 | (Euler a re-injects noise every step, so the eps output keeps moving) |
+| **0.5** | **8 / 28** | **15.0 s (−28 %)**, nearly the same image |
+| 0.7 | 10 / 28 | 12.5 s, the background changes more |
+
+Full job (base + 1.5× hi-res with RealESRGAN + face repair), back to back: **57.7 s → 42.5 s (−26 %)**, 13 model
+calls skipped. At full size the face is as sharp; distant buildings are a little softer. A denoised-prediction
+variant (reuse x0 instead of eps) was sketched for Euler a but not needed once 0.5 worked.
+
+![WAI v16: no cache / EasyCache 0.5 / 0.7](images/step-cache-wai-v16.jpg)
+
+In the app this is **Step cache** (inspector ▸ Image, off by default because the picture changes a little), using
+0.5 for both models; images made with it say `Step cache: EasyCache` in their parameters and "Use Prompt and
+Settings" restores it. In the app with it on: WAI v16 full job 31.6 s, WAI-ANIMA full job 76 s.
+
+### Small: cheaper WAI-ANIMA face repair
+
+stable-diffusion.cpp's ADetailer repainted each face crop at 1024×1024 (10 masked steps). Same image, one face:
+
+| Repaint | Time | Look |
+|---|---|---|
+| 1024 px, 10 steps (before) | 15.9 s | |
+| **768 px, 10 steps** | **8.7 s (−45 %)** | same at the size the face is pasted back |
+| 1024 px, 6 steps (16-step schedule) | 11.2 s | similar here |
+| 768 px, 6 steps | 6.2 s | similar here |
+| 1024 px + EasyCache 0.5 | 12.1 s (3 / 11 skipped) | same |
+
+![WAI-ANIMA face repair: before / 1024 / 768 / 1024 + cache](images/face-size-wai-anima.jpg)
+
+Fewer steps looked similar on this face too, but the job's step count is kept so the repair strength means
+what it did before. The app now detects the faces first and repaints at **768 px unless a face crop is larger than that**
+(close-ups keep 1024 px, so no detail is lost when the crop is pasted back), with the step cache when it's
+on: 5.1 s in the app test above. Images without a face skip the pass entirely. WAI v16's MLX face repair
+(6 s) keeps 1024 px.
+
+### Small: fp16 instead of bf16 for the MLX Anima model
+
+0.851-0.887 s vs 0.870-0.897 s per pass at 1024×1344 (batch 1, four runs each): within noise, and fp16 risks
+overflow in the residual stream. **Not kept** (`--anima-dtype f16` stays in the CLI for testing).
+
+### Not done
+
+A turbo / few-step distilled LoRA for WAI v16 was left out on purpose: it changes WAI's look.
+
+### CLI flags added
+
+`--cache mode[:key=value,...]` (WAI-ANIMA step cache), `--step-cache <threshold>` (WAI v16), `--face-size`,
+`--face-steps`, `--face-cache` and `--detail-only <image>` (WAI-ANIMA face repair on its own), `--anima-dtype f16`.
+
 ## Possible next steps
 
 - The Qwen3 text encoder of WAI-ANIMA and the face detector still run in stable-diffusion.cpp; both take well under
   a second, so there is little left to gain there.
-- What remains is mostly the models' own compute. Fewer steps (Fast mode) is the remaining big lever.
+- What remains is mostly the models' own compute. Fewer model calls (Fast mode, Step cache, or both) is the
+  remaining lever; they stack, but each changes the picture a little.

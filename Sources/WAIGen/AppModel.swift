@@ -284,7 +284,7 @@ final class AppModel {
                     : nil,
                 loras: jobLoRAs,
                 hiresUpscaler: upscalerURL,
-                livePreview: s.livePreview)
+                livePreview: s.livePreview, stepCache: s.stepCache)
             pending.append(job)
         }
         processNext()
@@ -356,7 +356,7 @@ final class AppModel {
             hires: (min(s.hiresScale, p.defaults.maxHiresScale), s.hiresSteps, s.hiresDenoise),
             faceRepair: detail && s.faceRepair && FileManager.default.fileExists(atPath: AppPaths.faceDetector.path)
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
-            loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview,
+            loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview, stepCache: s.stepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail))
         pending.append(job)
         processNext()
@@ -446,6 +446,7 @@ final class AppModel {
             faceRepairSeconds: result.faceRepairSeconds,
             loras: job.loras.isEmpty ? nil : job.loras.map { LoRARecord(path: $0.relativePath, strength: $0.strength) },
             hiresUpscaler: job.hires == nil ? nil : (job.hiresUpscaler?.lastPathComponent ?? "built-in"))
+        if job.stepCache { record.stepCache = true }
         if let up = job.upscale {
             record.upscaledFrom = up.source.lastPathComponent
             record.upscaleDetailPass = up.detailPass
@@ -524,6 +525,7 @@ final class AppModel {
         } else {
             settings.loras = []
         }
+        settings.stepCache = record.stepCache == true
         if seed { settings.seed = record.seed }
     }
 

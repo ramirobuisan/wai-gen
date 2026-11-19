@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-20 (night)
+
+- Step cache (opt-in, inspector ▸ Image): EasyCache step skipping for both models. WAI-ANIMA uses
+  stable-diffusion.cpp's `easycache` (threshold 0.5, 8 of 25 model calls skipped, −26 to −32 %); WAI v16 gets the
+  same rule in the MLX sampler (base, hi-res and face repair; full job −26 %). Recorded in the image parameters.
+- WAI-ANIMA face repair repaints at 768 px unless a face crop is bigger (15.9 s → 8.7 s per face, same look),
+  and skips the pass when no face is found.
+- Measured and dropped (docs/PERFORMANCE.md, round 4): `spectrum` cache (hazy images), `taylorseer`/`dbcache`
+  (don't apply to the MLX model), fp16 weights for the MLX Anima model (no gain).
+- CLI: `--cache`, `--step-cache`, `--face-size`, `--face-steps`, `--face-cache`, `--detail-only`, `--anima-dtype`.
+
 ## 2026-11-20
 
 - Removed the WAI v12 preset (the older version of WAI-illustrious-SDXL); WAI-ANIMA is now ⌘2.
