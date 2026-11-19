@@ -32,6 +32,8 @@ struct GenerationSettings: Codable, Equatable {
 
     /// Show the image forming step by step (latent projection, computed with each step).
     var livePreview = true
+    /// use the preset's fast sampler / step count instead of the ones above
+    var fastMode = false
 
     /// Hi-res upscaler model in models/upscale_models ("" = built-in bicubic / Lanczos).
     var hiresUpscaler = "RealESRGAN_x4plus_anime_6B.pth"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-20
+
+- Fast mode (opt-in, inspector ▸ Image): DPM++ 2M Karras 16 steps on WAI v16/v12 (−32 %), Euler 16 steps on
+  WAI-ANIMA (−28 %).
+- WAI-ANIMA LoRAs run on the MLX model (no longer fall back to stable-diffusion.cpp's model): ~1.7× faster.
+- Measured and dropped (see docs/PERFORMANCE.md, round 3): adapter caching, compiled Anima forward (opt-in only),
+  quantized Anima weights, batched CFG passes, batched multi-image generation.
+
 ## 2026-11-19 (evening)
 
 - Inspector: the model menu sits in the toolbar strip above it (no empty band), section titles are buttons

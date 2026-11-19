@@ -97,6 +97,7 @@ let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
 let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (default) or sdcpp
 let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
 let ditEngine = take("--dit-engine") ?? "mlx"      // WAI-ANIMA diffusion model: mlx (default) or sdcpp
+let benchAnima = take("--bench-anima")             // WxH: MLX Anima forward time, compile off/on, adapter share
 let vaeRoundtrip = take("--vae-roundtrip")         // encode + decode an image with the MLX VAE and exit
 let esrganTest = take("--esrgan-test")             // upscale an image with --hires-upscaler in MLX and sd.cpp, compare
 
@@ -160,6 +161,19 @@ if let esrganTest {
 if let diffusionPath {
     // ---------------- WAI-ANIMA through stable-diffusion.cpp
     guard let llmPath, let vaePath else { fail("--llm and --vae are required with --diffusion-model") }
+    if let benchAnima {
+        let wh = benchAnima.split(separator: "x").compactMap { Int($0) }
+        guard wh.count == 2 else { fail("--bench-anima WxH") }
+        do {
+            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath))
+            for (b, c) in [(1, false), (2, false), (1, false), (2, false)] {
+                let r = dit.benchmark(width: wh[0], height: wh[1], batch: b, compiled: c)
+                print(String(format: "%dx%d batch %d compile %@: %.3f s per forward per sample (adapter %.4f s)", wh[0], wh[1], b,
+                             c ? "on " : "off", r.forward, r.adapter))
+            }
+        } catch { fail(error.localizedDescription) }
+        finish(0)
+    }
     if let vaeRoundtrip {
         guard let img = loadRGB(vaeRoundtrip) else { fail("couldn't read \(vaeRoundtrip)") }
         do {
@@ -197,7 +211,12 @@ if let diffusionPath {
         if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
         if ditEngine == "mlx" {
             let td = Date()
-            engine.externalDiffusion = MLXDiTBridge(try AnimaDiT(url: URL(fileURLWithPath: diffusionPath)))
+            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath))
+            if !loras.isEmpty {
+                let r = try dit.setLoRAs(loras)
+                print("MLX Anima LoRA: \(r.applied) layers, \(r.unmatched.count) unmatched")
+            }
+            engine.externalDiffusion = MLXDiTBridge(dit)
             print(String(format: "MLX Anima model loaded in %.1fs (hook %@)", Date().timeIntervalSince(td),
                          engine.externalDiffusionActive ? "active" : "NOT active"))
         }
@@ -214,6 +233,7 @@ if let diffusionPath {
             if let hiresUpscalerPath { img = try upscaleImage(img, model: hiresUpscalerPath) }
             img = img.resized(width: tw, height: th)
             var p = SDCppParameters(prompt: prompt)
+            p.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }   // its own model + text encoder
             p.negativePrompt = negative
             p.width = tw
             p.height = th
@@ -234,6 +254,7 @@ if let diffusionPath {
 
     for run in 1 ... repeats {
         var p = SDCppParameters(prompt: prompt)
+            p.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }   // its own model + text encoder
         p.negativePrompt = negative
         if let width { p.width = width }
         if let height { p.height = height }

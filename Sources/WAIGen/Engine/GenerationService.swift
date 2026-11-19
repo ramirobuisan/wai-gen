@@ -305,9 +305,22 @@ final class GenerationService: @unchecked Sendable {
         let p = job.preset
         if sdcpp[p.id] == nil { progress(.loadingModel(p.name)) }
         let engine = try loadSDCpp(p, job.modelsRoot)
-        // LoRAs are applied inside stable-diffusion.cpp's own model: use it for jobs with LoRAs
         if let bridge = mlxDiT[p.id] {
-            let wanted: SDCppExternalDiffusion? = job.loras.isEmpty ? bridge : nil
+            // LoRAs are merged into the MLX model too; only a LoRA it can't fully map (LoHa, LoKr, ...)
+            // sends the job back to stable-diffusion.cpp's own model, which applies it itself
+            var useMLX = true
+            do {
+                let report = try bridge.model.setLoRAs(job.loras.map { LoRASpec(url: $0.url, strength: Float($0.strength)) })
+                if !report.unmatched.isEmpty {
+                    FileHandle.standardError.write(Data("MLX Anima LoRA: \(report.unmatched.count) unmatched modules, using stable-diffusion.cpp's model\n".utf8))
+                    _ = try? bridge.model.setLoRAs([])
+                    useMLX = false
+                }
+            } catch {
+                _ = try? bridge.model.setLoRAs([])
+                useMLX = false
+            }
+            let wanted: SDCppExternalDiffusion? = useMLX ? bridge : nil
             if (engine.externalDiffusion == nil) != (wanted == nil) { engine.externalDiffusion = wanted }
         }
         return engine

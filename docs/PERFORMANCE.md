@@ -162,8 +162,55 @@ and look the same:
 the cold model load: **156.8 s** (face repair 22.4 s), memory footprint 6.7 GB. The same job was 346 s this
 morning and 750 s before the VAE port.
 
+## Round 3 (2026-11-20)
+
+Same order: trivial, small, medium. Everything measured; what didn't pay off was dropped.
+
+### Trivial: Fast mode (opt-in)
+
+A sampler that converges in fewer steps, as a switch in the inspector (off by default, because the picture
+changes: Euler a re-injects noise every step, the fast samplers don't). Same seed, 1024×1344:
+
+| Model | Normal | Fast | Look |
+|---|---|---|---|
+| WAI v16 | Euler a, 28 steps: 14.8 s | **DPM++ 2M Karras, 16 steps: 10.1 s (−32 %)** | clean; 16 steps as good as 20 |
+| WAI-ANIMA | Euler a, 25 steps: 35.4 s | **Euler, 16 steps: 25.4 s (−28 %)** | clean; DPM++ 2M at 16 steps left blotchy texture on this flow model |
+
+![WAI v16: Euler a 28 / DPM++ 2M Karras 20 / 16](images/fast-mode-wai-v16.jpg)
+![WAI-ANIMA: Euler a 25 / DPM++ 2M 16 / Euler 16](images/fast-mode-wai-anima.jpg)
+
+### Small changes
+
+| Change | Measured | Kept? |
+|---|---|---|
+| Caching the LLM adapter output across steps (WAI-ANIMA) | the adapter is 4.5 ms of a ~700 ms forward pass (0.6 %) | no |
+| `MLX.compile` on the MLX Anima forward pass | −3.5 % per pass once traced (0.704 → 0.679 s), but cond and uncond have different text lengths, so every image traces it twice (and again for hi-res): a 10-step image went 13.1 → 13.8 s. Bit-identical output | opt-in only (`WAIGEN_COMPILE=1`) |
+| Quantized Anima linears in MLX | bf16 0.784 s per pass; 8-bit affine 0.812 s; mxfp8 0.883 s; 4-bit 0.784 s (and lower quality). With 5 376 image tokens the GEMMs are compute-bound, bf16 is the fast path | no |
+
+### Medium
+
+| Change | Measured | Kept? |
+|---|---|---|
+| Both CFG passes of a WAI-ANIMA step in one MLX call (needs another sd.cpp patch) | batch 2 vs batch 1 per sample: 0.752/0.737 s vs 0.787/0.708 s, no consistent gain: the GPU is already saturated at batch 1 | no |
+| **LoRAs on the MLX Anima model** | see below | **yes** |
+| "Images: 2+" as one batch (WAI v16/v12) | −12 % on the base pass only; with hi-res and face repair (where most of the time goes) about 2-5 % per image, for multi-image runs only, while every stage (hi-res, face repair, previews, per-seed noise) would need batching | no |
+
+**LoRAs on the MLX Anima model.** WAI-ANIMA jobs with LoRAs used to fall back to stable-diffusion.cpp's model
+(2.7 s/step). `AnimaDiT.setLoRAs` now merges them into the MLX weights (`W += strength · alpha/rank · up·down`, the
+originals kept to undo it) with the key formats stable-diffusion.cpp accepts (kohya `lora_down/lora_up/alpha`, PEFT
+`lora_A/lora_B`, `lora_unet_` underscores, `diffusion_model.`/`transformer.`/`net.` prefixes). A LoRA it can't fully
+map (LoHa, LoKr) still goes to stable-diffusion.cpp's model. Checked with a synthetic rank-8 LoRA on 36 layers,
+same seed, 10 steps:
+
+- MLX vs stable-diffusion.cpp, both with the LoRA: **37.6 dB** (they agree);
+- MLX with vs without the LoRA: 21.4 dB (the LoRA really changes the image);
+- 14.6 s vs 25.6 s for the image (1.49 vs 2.45 s/step).
+
+The SDXL path was also checked with a real character LoRA (kohya, rank 32, text encoders + UNet): 1 056 layers
+applied, 0 unmatched, and the MLX face repair keeps the LoRA.
+
 ## Possible next steps
 
-- Generate "Images: 2+" as one batch on MLX (−12 % per image, measured above).
-- LoRAs for the MLX Anima model, so LoRA jobs don't fall back to stable-diffusion.cpp's model.
-- Batch the cond/uncond passes of WAI-ANIMA into one MLX call (stable-diffusion.cpp calls the model twice per step).
+- The Qwen3 text encoder of WAI-ANIMA and the face detector still run in stable-diffusion.cpp; both take well under
+  a second, so there is little left to gain there.
+- What remains is mostly the models' own compute. Fewer steps (Fast mode) is the remaining big lever.

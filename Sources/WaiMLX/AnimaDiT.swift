@@ -1,13 +1,17 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXRandom
 
 /// The Anima diffusion model (Cosmos-Predict2-style DiT with an LLM adapter) used by WAI-ANIMA, in MLX.
 /// A direct port of stable-diffusion.cpp's `src/model/diffusion/anima.hpp`, so it can stand in for it
 /// through `sd_set_diffusion_hook`: same inputs (latent, timestep, Qwen3 hidden states, adapter token ids
 /// and weights), same output (the flow prediction).
 public final class AnimaDiT {
-    private let w: [String: MLXArray]
+    private var w: [String: MLXArray]
+    /// weights as loaded, for the ones a LoRA changed (to undo it)
+    private var original: [String: MLXArray] = [:]
+    private var appliedLoRAs: [String] = []
     public let layers: Int
     public let dtype: DType
     private let hidden = 2048, heads = 16, headDim = 128, patch = 2, outChannels = 16
@@ -32,8 +36,77 @@ public final class AnimaDiT {
                           userInfo: [NSLocalizedDescriptionKey: "\(url.lastPathComponent) isn't an Anima diffusion model"])
         }
         layers = n
+        // (8-bit, mxfp8 and 4-bit quantized linears were measured: none is faster than bf16 here,
+        // see docs/PERFORMANCE.md)
         self.w = w
         eval(Array(w.values))
+    }
+
+    // MARK: LoRA
+
+    public struct LoRAReport: Sendable {
+        public var applied = 0
+        public var unmatched: [String] = []
+    }
+
+    /// Merge these LoRAs into the weights (W += strength · alpha/rank · up·down), undoing earlier ones
+    /// first; same key formats as stable-diffusion.cpp (kohya `lora_down/lora_up/alpha`, PEFT
+    /// `lora_A/lora_B`, `lora_unet_` underscores; `diffusion_model.`/`transformer.`/`net.` prefixes).
+    /// `unmatched` lists the modules it couldn't map (e.g. LoHa/LoKr or text-encoder parts).
+    public func setLoRAs(_ loras: [LoRASpec]) throws -> LoRAReport {
+        let signature = loras.map { "\($0.url.path)@\($0.strength)" }
+        var report = LoRAReport()
+        if signature == appliedLoRAs { return report }
+        for (k, v) in original { w[k] = v }
+        original.removeAll()
+        appliedLoRAs = []
+        compiled.removeAll()   // weights changed: re-trace if compile is on
+        guard !loras.isEmpty else { return report }
+
+        // module names in this model, also in kohya's underscore form
+        var underscored: [String: String] = [:]
+        for key in w.keys where key.hasSuffix(".weight") {
+            let module = String(key.dropLast(".weight".count))
+            underscored[module.replacingOccurrences(of: ".", with: "_")] = module
+        }
+        for lora in loras {
+            var parts: [String: (down: MLXArray?, up: MLXArray?, alpha: Float?)] = [:]
+            for (key, value) in try loadArrays(url: lora.url) {
+                var k = key
+                for prefix in ["model.diffusion_model.net.", "model.diffusion_model.", "diffusion_model.net.", "diffusion_model.",
+                               "transformer.", "base_model.model.", "net.", "lora_unet_"] where k.hasPrefix(prefix) {
+                    k = String(k.dropFirst(prefix.count))
+                    break
+                }
+                let suffixes: [(String, Int)] = [(".lora_down.weight", 0), (".lora_A.default.weight", 0), (".lora_A.weight", 0),
+                                                  (".lora_up.weight", 1), (".lora_B.default.weight", 1), (".lora_B.weight", 1),
+                                                  (".alpha", 2)]
+                guard let (suffix, kind) = suffixes.first(where: { k.hasSuffix($0.0) }) else { continue }
+                var module = String(k.dropLast(suffix.count))
+                if w[module + ".weight"] == nil, let m = underscored[module] { module = m }
+                var entry = parts[module] ?? (nil, nil, nil)
+                switch kind {
+                case 0: entry.down = value
+                case 1: entry.up = value
+                default: entry.alpha = value.asType(.float32).item(Float.self)
+                }
+                parts[module] = entry
+            }
+            for (module, p) in parts {
+                let key = module + ".weight"
+                guard let down = p.down, let up = p.up, let base = w[key], down.ndim == 2, up.ndim == 2,
+                      up.dim(0) == base.dim(0), down.dim(1) == base.dim(1)
+                else { report.unmatched.append(module); continue }
+                let rank = Float(down.dim(0))
+                let scale = lora.strength * (p.alpha ?? rank) / rank
+                if original[key] == nil { original[key] = base }
+                w[key] = (base.asType(.float32) + matmul(up.asType(.float32), down.asType(.float32)) * scale).asType(dtype)
+                report.applied += 1
+            }
+        }
+        eval(Array(original.keys).compactMap { w[$0] })
+        appliedLoRAs = signature
+        return report
     }
 
     // MARK: layers
@@ -151,10 +224,58 @@ public final class AnimaDiT {
         return rms(linear(x, "llm_adapter.out_proj"), "llm_adapter.norm")
     }
 
+    /// Run the forward pass through `MLX.compile`. Opt-in (WAIGEN_COMPILE=1): it saves ~3.5 % per forward
+    /// pass once traced, but cond and uncond have different text lengths, so every image traces it twice
+    /// (and again for hi-res) and a whole image ends up no faster (docs/PERFORMANCE.md).
+    public var compileForward = ProcessInfo.processInfo.environment["WAIGEN_COMPILE"] == "1"
+    private var compiled: [Bool: @Sendable ([MLXArray]) -> [MLXArray]] = [:]
+
     /// x [N, 16, H, W] (latent), timesteps [N], context [N, L, 1024] (Qwen3 states), adapter token ids and
     /// weights [n] -> prediction [N, 16, H, W]. Inputs in any float type; output float32.
     public func callAsFunction(_ xIn: MLXArray, timesteps: MLXArray, context ctxIn: MLXArray,
                                tokenIDs: MLXArray?, tokenWeights: MLXArray?) -> MLXArray {
+        guard compileForward else { return forward(xIn, timesteps: timesteps, context: ctxIn, tokenIDs: tokenIDs, tokenWeights: tokenWeights) }
+        let hasTokens = tokenIDs != nil
+        // RoPE tables are built (and cached) outside the traced function
+        _ = imageRope(h: (xIn.dim(2) + 1) / patch, w: (xIn.dim(3) + 1) / patch)
+        if hasTokens, let ids = tokenIDs { _ = lineRope(ids.dim(0), dim: 64); _ = lineRope(ctxIn.dim(1), dim: 64) }
+        let f = compiled[hasTokens] ?? {
+            let f = compile { [unowned self] a in
+                [self.forward(a[0], timesteps: a[1], context: a[2], tokenIDs: hasTokens ? a[3] : nil,
+                              tokenWeights: hasTokens ? a[4] : nil)]
+            }
+            compiled[hasTokens] = f
+            return f
+        }()
+        var inputs = [xIn.asType(dtype), timesteps.asType(.float32), ctxIn.asType(dtype)]
+        if let tokenIDs { inputs += [tokenIDs.asType(.int32), (tokenWeights ?? MLXArray.ones([tokenIDs.dim(0)])).asType(dtype)] }
+        return f(inputs)[0]
+    }
+
+    /// Seconds per forward pass (the model runs twice per sampling step: cond + uncond) at width x height
+    /// pixels, compiled or not, plus the share of the LLM adapter.
+    public func benchmark(width: Int, height: Int, batch: Int = 1, runs: Int = 4, compiled useCompile: Bool)
+        -> (forward: Double, adapter: Double)
+    {
+        let x = MLXRandom.normal([batch, 16, height / 8, width / 8])
+        let t = MLXArray(Array(repeating: Float(0.5), count: batch))
+        let ctx = MLXRandom.normal([batch, 120, 1024])
+        let ids = MLXArray((0 ..< 120).map { Int32($0 * 37 % 32000) }), wts = MLXArray.ones([120])
+        let saved = compileForward
+        compileForward = useCompile
+        defer { compileForward = saved }
+        eval(self(x, timesteps: t, context: ctx, tokenIDs: ids, tokenWeights: wts))
+        var t0 = Date()
+        for _ in 0 ..< runs { eval(self(x, timesteps: t, context: ctx, tokenIDs: ids, tokenWeights: wts)) }
+        let fwd = Date().timeIntervalSince(t0) / Double(runs * batch)   // per sample
+        eval(adapter(ctx.asType(dtype), ids: ids))
+        t0 = Date()
+        for _ in 0 ..< runs { eval(adapter(ctx.asType(dtype), ids: ids)) }
+        return (fwd, Date().timeIntervalSince(t0) / Double(runs))
+    }
+
+    private func forward(_ xIn: MLXArray, timesteps: MLXArray, context ctxIn: MLXArray,
+                         tokenIDs: MLXArray?, tokenWeights: MLXArray?) -> MLXArray {
         let (n, c, hh, ww) = (xIn.dim(0), xIn.dim(1), xIn.dim(2), xIn.dim(3))
         let (ph, pw) = ((patch - hh % patch) % patch, (patch - ww % patch) % patch)
         var x = xIn.asType(dtype)

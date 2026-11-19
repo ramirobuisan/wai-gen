@@ -93,6 +93,14 @@ struct PresetDefaults: Equatable {
     var maxHiresScale: Double
     var qualityPrefix: String
     var negative: String
+    /// "Fast mode": fewer steps with a sampler that converges sooner (compared in docs/PERFORMANCE.md)
+    var fast: FastSampling = .init(sampler: .dpmpp2m, scheduler: .karras, steps: 16)
+}
+
+struct FastSampling: Equatable {
+    var sampler: Sampler
+    var scheduler: Scheduler
+    var steps: Int
 }
 
 struct ModelPreset: Identifiable, Hashable {
@@ -159,7 +167,9 @@ enum ModelCatalog {
             defaults: PresetDefaults(
                 width: 1024, height: 1344, steps: 25, cfg: 4.5, sampler: .eulerA, scheduler: .normal,
                 hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 1.5,
-                qualityPrefix: "masterpiece, best quality, score_7", negative: animaNegative),
+                qualityPrefix: "masterpiece, best quality, score_7", negative: animaNegative,
+                // flow model: DPM++ 2M leaves blotches at 16 steps, plain Euler stays clean
+                fast: .init(sampler: .euler, scheduler: .normal, steps: 16)),
             source: "Civitai 2544636 v1.0: Euler a normal, 20-30 steps, CFG 4-5, hires ≤1.5x/20 steps/denoise 0.35-0.5"),
     ]
 

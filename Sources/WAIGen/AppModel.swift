@@ -264,6 +264,7 @@ final class AppModel {
             errorMessage = "The hi-res upscaler \(s.hiresUpscaler) isn't in \(Self.upscalerFolder.path). Pick another one in the inspector."
             return
         }
+        let fast = s.fastMode ? preset.defaults.fast : nil   // Fast mode: the preset's quicker sampler / steps
         for i in 0 ..< max(1, s.batchCount) {
             let seed = s.seed < 0 ? Int64(UInt32.random(in: 0 ... UInt32.max)) : s.seed + Int64(i)
             var rng = SeededRNG(state: UInt64(bitPattern: seed) ^ 0xA5A5)
@@ -272,8 +273,8 @@ final class AppModel {
                 positive: assemblePositive(seed: seed),
                 negative: Wildcards.expand(s.negative, using: &rng),
                 characters: s.characters, userPrompt: s.prompt,
-                width: s.width, height: s.height, steps: s.steps, cfg: s.cfg,
-                sampler: s.sampler, scheduler: s.scheduler, seed: seed,
+                width: s.width, height: s.height, steps: fast?.steps ?? s.steps, cfg: s.cfg,
+                sampler: fast?.sampler ?? s.sampler, scheduler: fast?.scheduler ?? s.scheduler, seed: seed,
                 hires: s.hiresEnabled && s.hiresScale > 1
                     ? (min(s.hiresScale, preset.defaults.maxHiresScale), s.hiresSteps, s.hiresDenoise) : nil,
                 faceRepair: s.faceRepair

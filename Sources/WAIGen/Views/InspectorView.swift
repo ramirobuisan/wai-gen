@@ -72,6 +72,11 @@ struct InspectorView: View {
                 SeedRow(seed: $model.settings.seed)
                 Stepper("Images: \(model.settings.batchCount)", value: $model.settings.batchCount, in: 1 ... 16)
                 Toggle("Live preview", isOn: $model.settings.livePreview)
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Fast mode", isOn: $model.settings.fastMode)
+                    Text("\(preset.defaults.fast.sampler.label) · \(preset.defaults.fast.scheduler.label) · \(preset.defaults.fast.steps) steps: about 30 % faster, a slightly different look")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                     .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
             }
 
