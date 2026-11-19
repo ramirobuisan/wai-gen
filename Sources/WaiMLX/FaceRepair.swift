@@ -20,23 +20,18 @@ public struct FaceRepairSettings: Sendable {
     public init() {}
 }
 
-extension WaiSDXL {
-    /// Repaint each face like stable-diffusion.cpp's ADetailer ("inpaint only masked"), but with this MLX
-    /// engine: the box is dilated, padded and expanded to a square crop, the crop is resized to
-    /// `inpaintSize`, repainted with img2img at `strength` while keeping the original latent outside the
-    /// box at every step, then resized back and blended in through a Gaussian-feathered mask.
-    /// The geometry and resampling follow stable-diffusion.cpp's detailer.cpp line by line.
-    /// `rgb`: RGB8, `width` x `height`. `p`: prompt, negative, cfg, sampler, scheduler, steps, seed
-    /// (face i uses seed + i). `progress(face, step, steps)`.
-    public func repairFaces(
-        rgb: Data, width: Int, height: Int, faces: [FaceBox], _ p: SDXLParameters,
-        settings s: FaceRepairSettings = FaceRepairSettings(),
-        isCancelled: () -> Bool = { false },
-        progress: (Int, Int, Int) -> Void = { _, _, _ in }
-    ) throws -> Data {
+/// The geometry of stable-diffusion.cpp's ADetailer ("inpaint only masked", detailer.cpp ported line by line),
+/// with the repaint supplied by the caller: each box is dilated, padded and expanded to a square crop, the
+/// crop is resized to `inpaintSize`, `repaint(crop, mask, faceIndex)` repaints it (RGB8 and a 0/1 mask, both
+/// `inpaintSize` square, returns RGB8 of the same size), and the result is resized back and blended in
+/// through a Gaussian-feathered mask.
+public enum FaceRepairGeometry {
+    public static func apply(
+        rgb: Data, width: Int, height: Int, faces: [FaceBox], settings s: FaceRepairSettings,
+        repaint: (_ crop: [UInt8], _ mask: [Float], _ index: Int) throws -> [UInt8]
+    ) rethrows -> Data {
         var image = [UInt8](rgb)
         let size = s.inpaintSize
-        var cond: (MLXArray, MLXArray)?
         for (i, face) in faces.enumerated() {
             // bbox_mask + morphology_mask(dilate): a box dilated by kernel `dilate` (before = k/2, after = k-before-1)
             let bx1 = clampi(Int(face.x1.rounded(.down)), 0, width), by1 = clampi(Int(face.y1.rounded(.down)), 0, height)
@@ -60,13 +55,7 @@ extension WaiSDXL {
                 }
             }
 
-            if cond == nil { cond = encodeText(p) }
-            var pi = p
-            pi.seed = p.seed &+ UInt64(i)
-            let repainted = try repaint(
-                MLXArray(local, [size, size, 3]), mask: MLXArray(localMask, [size, size]), pi, strength: s.strength,
-                cond: cond!, isCancelled: isCancelled, progress: { progress(i, $0, $1) })
-            let generated = repainted.asArray(UInt8.self)
+            let generated = try repaint(local, localMask, i)
 
             // gaussian_blur_mask(mask, blur) -> feather; composite_crop (bilinear from the generated crop)
             let feather = featherMask(mask, width: width, height: height, radius: s.maskBlur)
@@ -86,6 +75,38 @@ extension WaiSDXL {
             }
         }
         return Data(image)
+    }
+
+    /// Side of the largest square crop the faces need (box + dilation + padding on both sides), to pick
+    /// a repaint size that doesn't throw away detail.
+    public static func largestCrop(_ faces: [FaceBox], settings s: FaceRepairSettings) -> Int {
+        faces.map { Int((max($0.x2 - $0.x1, $0.y2 - $0.y1)).rounded(.up)) + s.dilate + 2 * s.padding }.max() ?? 0
+    }
+}
+
+extension WaiSDXL {
+    /// Repaint each face like stable-diffusion.cpp's ADetailer (`FaceRepairGeometry`) with this MLX engine:
+    /// masked img2img at `strength`, keeping the original latent outside the box at every step.
+    /// `rgb`: RGB8, `width` x `height`. `p`: prompt, negative, cfg, sampler, scheduler, steps, seed
+    /// (face i uses seed + i). `progress(face, step, steps)`.
+    public func repairFaces(
+        rgb: Data, width: Int, height: Int, faces: [FaceBox], _ p: SDXLParameters,
+        settings s: FaceRepairSettings = FaceRepairSettings(),
+        isCancelled: () -> Bool = { false },
+        progress: (Int, Int, Int) -> Void = { _, _, _ in }
+    ) throws -> Data {
+        let size = s.inpaintSize
+        var cond: (MLXArray, MLXArray)?
+        return try FaceRepairGeometry.apply(rgb: rgb, width: width, height: height, faces: faces, settings: s) {
+            local, localMask, i in
+            if cond == nil { cond = encodeText(p) }
+            var pi = p
+            pi.seed = p.seed &+ UInt64(i)
+            let repainted = try repaint(
+                MLXArray(local, [size, size, 3]), mask: MLXArray(localMask, [size, size]), pi, strength: s.strength,
+                cond: cond!, isCancelled: isCancelled, progress: { progress(i, $0, $1) })
+            return repainted.asArray(UInt8.self)
+        }
     }
 
     /// img2img on `image` (uint8 [H, W, 3], multiples of 8) that only changes the masked part: after

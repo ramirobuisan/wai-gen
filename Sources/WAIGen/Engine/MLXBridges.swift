@@ -20,6 +20,9 @@ final class MLXVAEBridge: SDCppExternalVAE {
     }
 }
 
+/// WAI-ANIMA's Qwen3 text encoder in MLX for stable-diffusion.cpp (0.08 s instead of 0.33 s for the first prompt).
+extension Qwen3TextEncoder: SDCppExternalTextEncoder {}
+
 /// Runs WAI-ANIMA's diffusion model in MLX for stable-diffusion.cpp (2x faster per step).
 final class MLXDiTBridge: SDCppExternalDiffusion {
     let model: AnimaDiT

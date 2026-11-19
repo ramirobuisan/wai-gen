@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-20 (late)
+
+- The face detector (YOLOv8) runs in MLX for both models: same boxes, 0.011 s instead of 0.07-0.27 s. WAI-ANIMA's
+  face repair is driven from Swift (MLX detector, ADetailer geometry, stable-diffusion.cpp's masked img2img per
+  crop): same result (52.6 dB), one detection instead of two. WAI v16 no longer uses stable-diffusion.cpp.
+- WAI-ANIMA's Qwen3 text encoder runs in MLX through a new hook in the patch (`sd_set_text_encoder_hook`);
+  stable-diffusion.cpp keeps the tokenizers and no longer loads its copy: first prompt 0.33 s → 0.08 s.
+- `WAIGEN_SDCPP_LOG=info` prints stable-diffusion.cpp's stage timings. CLI: `--detect-test`, `--detect-engine`,
+  `--te-engine`, `--bench-te`, `WAIGEN_DUMP_CONTEXT`.
+
 ## 2026-11-20 (night)
 
 - Step cache (opt-in, inspector ▸ Image): EasyCache step skipping for both models. WAI-ANIMA uses

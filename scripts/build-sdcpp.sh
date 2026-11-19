@@ -1,6 +1,7 @@
 #!/bin/bash
 # Fetches stable-diffusion.cpp at the commit WAI Gen is tested with, applies WAI Gen's patch
-# (patches/stable-diffusion.cpp.patch: VAE hook for MLX, detection-only face detector) and builds the static libraries
+# (patches/stable-diffusion.cpp.patch: VAE, diffusion-model and text-encoder hooks for MLX, detection-only face
+# detector) and builds the static libraries
 # that Package.swift links (Metal backend).
 set -euo pipefail
 cd "$(dirname "$0")/.."

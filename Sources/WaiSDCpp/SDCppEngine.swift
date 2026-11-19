@@ -83,6 +83,9 @@ public struct SDCppParameters: Sendable {
     public var stepCache: SDCppStepCache? = nil
     /// img2img: start from this image (must already be width x height); `strength` = denoise.
     public var initImage: RGBImage? = nil
+    /// with `initImage`: only repaint where this mask (one byte per pixel, width x height, 255 = repaint) is set;
+    /// the original latent is kept elsewhere at every step (the masked img2img stable-diffusion.cpp's ADetailer uses)
+    public var maskImage: Data? = nil
     public var strength: Float = 0.4
     public var prompt: String
     public var negativePrompt = ""
@@ -321,6 +324,11 @@ public protocol SDCppExternalDiffusion: AnyObject {
                  tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool
 }
 
+/// An external text encoder: the Qwen3 forward pass of an Anima model (token ids -> final hidden states).
+public protocol SDCppExternalTextEncoder: AnyObject {
+    func encode(ids: UnsafePointer<Int32>, count: Int, into output: UnsafeMutablePointer<Float>, hidden: Int) -> Bool
+}
+
 /// Owns one stable-diffusion.cpp context (models stay loaded between generations).
 public final class SDCppEngine: @unchecked Sendable {
     private var ctx: OpaquePointer?
@@ -346,6 +354,27 @@ public final class SDCppEngine: @unchecked Sendable {
                 let ctxShape = [Int(cs[2]), Int(cs[1]), Int(cs[0])]
                 return model.forward(x: x, shape: shape, timesteps: ts, nTimesteps: Int(nts), context: c,
                                      contextShape: ctxShape, tokenIDs: ids, tokenWeights: wts, nTokens: Int(ntok), into: out)
+            }, Unmanaged.passUnretained(self).toOpaque())
+        }
+    }
+
+    /// Runs the text encoder's forward pass instead of stable-diffusion.cpp (Anima models only; tokenizing
+    /// stays in stable-diffusion.cpp). While set, stable-diffusion.cpp never loads its own copy of the
+    /// encoder. Set it while the engine is idle; `externalTextEncoderActive` tells whether it was taken.
+    public private(set) var externalTextEncoderActive = false
+    public var externalTextEncoder: SDCppExternalTextEncoder? {
+        didSet {
+            guard let ctx else { return }
+            guard externalTextEncoder != nil else {
+                _ = sd_set_text_encoder_hook(ctx, nil, nil)
+                externalTextEncoderActive = false
+                return
+            }
+            externalTextEncoderActive = sd_set_text_encoder_hook(ctx, { ids, n, out, hidden, data in
+                guard let ids, let out, let data else { return false }
+                let engine = Unmanaged<SDCppEngine>.fromOpaque(data).takeUnretainedValue()
+                guard let te = engine.externalTextEncoder else { return false }
+                return te.encode(ids: ids, count: Int(n), into: out, hidden: Int(hidden))
             }, Unmanaged.passUnretained(self).toOpaque())
         }
     }
@@ -414,6 +443,7 @@ public final class SDCppEngine: @unchecked Sendable {
             sd_set_generation_progress_callback(ctx, nil, nil)
             sd_set_vae_hook(ctx, nil, nil)
             _ = sd_set_diffusion_hook(ctx, nil, nil)
+            _ = sd_set_text_encoder_hook(ctx, nil, nil)
             sd_ctx_free(ctx)
         }
     }
@@ -474,6 +504,18 @@ public final class SDCppEngine: @unchecked Sendable {
             defer { sd_tensor_free(tensor) }   // the options keep their own reference
             try check(sd_opt_set_tensor(opt, "init_image", tensor), "init_image")
             try check(sd_opt_set_float(opt, "strength", Double(p.strength)), "strength")
+            if let mask = p.maskImage {
+                guard mask.count == initImage.width * initImage.height else {
+                    throw SDCppError.setup("mask_image: expected \(initImage.width * initImage.height) bytes")
+                }
+                var mshape: [Int64] = [1, Int64(initImage.width), Int64(initImage.height)]
+                let mtensor = mask.withUnsafeBytes { buf in
+                    sd_tensor_create(sd_tensor_type_t(SD_TENSOR_U8), 3, &mshape, buf.baseAddress, buf.count)
+                }
+                guard let mtensor else { throw SDCppError.generation("could not wrap the mask: \(lastError())") }
+                defer { sd_tensor_free(mtensor) }
+                try check(sd_opt_set_tensor(opt, "mask_image", mtensor), "mask_image")
+            }
         }
         if let scale = p.hiresScale, scale > 1 {
             try check(sd_opt_set_bool(opt, "hires.enabled", true), "hires.enabled")

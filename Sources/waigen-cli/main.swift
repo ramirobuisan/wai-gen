@@ -39,13 +39,23 @@ func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
 }
 
 /// MLX Anima model for stable-diffusion.cpp's diffusion forward passes
+extension Qwen3TextEncoder: SDCppExternalTextEncoder {}
+
 final class MLXDiTBridge: SDCppExternalDiffusion {
     let model: AnimaDiT
     init(_ model: AnimaDiT) { self.model = model }
+    private var dumped = false
     func forward(x: UnsafePointer<Float>, shape: [Int], timesteps: UnsafePointer<Float>, nTimesteps: Int,
                  context: UnsafePointer<Float>, contextShape: [Int], tokenIDs: UnsafePointer<Int32>?,
                  tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool {
-        model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
+        // WAIGEN_DUMP_CONTEXT=file: save the first text-encoder states the model receives (to compare encoders)
+        if !dumped, let path = ProcessInfo.processInfo.environment["WAIGEN_DUMP_CONTEXT"] {
+            dumped = true
+            let n = contextShape.reduce(1, *)
+            try? Data(bytes: context, count: n * 4).write(to: URL(fileURLWithPath: path))
+            print("context \(contextShape) dumped to \(path)")
+        }
+        return model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
                   tokenIDs: tokenIDs, tokenWeights: tokenWeights, nTokens: nTokens, into: output)
     }
 }
@@ -96,6 +106,8 @@ let refinePath = take("--refine")        // upscale + detail pass on an existing
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
 let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (default) or sdcpp
 let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
+let benchTE = take("--bench-te")                   // "prompt|prompt|...": WAI-ANIMA text encoding time per new prompt
+let teEngine = take("--te-engine") ?? "mlx"        // WAI-ANIMA text encoder (Qwen3 forward): mlx (default) or sdcpp
 let ditEngine = take("--dit-engine") ?? "mlx"      // WAI-ANIMA diffusion model: mlx (default) or sdcpp
 let benchAnima = take("--bench-anima")             // WxH: MLX Anima forward time, compile off/on, adapter share
 let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16   // MLX Anima weights: bf16 (default) or f16
@@ -126,6 +138,8 @@ let faceDetector = take("--face-repair")   // path to face_yolov8m.safetensors
 let faceEngine = take("--face-engine") ?? "mlx"   // face repainting for SDXL: mlx (default) or sdcpp
 let faceStrength = take("--face-strength").flatMap(Float.init) ?? 0.4
 let sdxlStepCache = take("--step-cache").flatMap(Float.init)   // WAI Illustrious: MLX step cache threshold
+let detectTest = take("--detect-test")   // comma-separated images: MLX vs stable-diffusion.cpp face detector
+let detectEngine = take("--detect-engine") ?? "mlx"   // face detector (and WAI-ANIMA face repaint driver): mlx or sdcpp
 let detailOnly = take("--detail-only")   // WAI-ANIMA: run only the face repair on this image
 let faceSize = take("--face-size").flatMap(Int.init)     // WAI-ANIMA face repair: repaint size (default 1024)
 let faceSteps = take("--face-steps").flatMap(Int.init)   // WAI-ANIMA face repair: schedule length (default --steps)
@@ -141,6 +155,34 @@ func outputURL(_ run: Int) -> URL {
 
 func showProgress(_ label: String, _ i: Int, _ n: Int) {
     FileHandle.standardError.write(Data("\r\(label) \(i)/\(n)   ".utf8))
+}
+
+if let detectTest {
+    guard let faceDetector else { fail("--detect-test needs --face-repair <detector.safetensors>") }
+    do {
+        let tl = Date()
+        let mlx = try YOLOFaceDetector(url: URL(fileURLWithPath: faceDetector))
+        print(String(format: "MLX detector loaded in %.2fs", Date().timeIntervalSince(tl)))
+        let sd = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
+        for path in detectTest.split(separator: ",").map(String.init) {
+            guard let img = loadRGB(path) else { fail("couldn't read \(path)") }
+            _ = mlx.detect(rgb: img.pixels, width: img.width, height: img.height)   // warm-up
+            _ = try sd.detect(img)
+            var tm = Date()
+            var a: [FaceBox] = []
+            for _ in 0 ..< 5 { a = mlx.detect(rgb: img.pixels, width: img.width, height: img.height) }
+            let mlxTime = Date().timeIntervalSince(tm) / 5
+            tm = Date()
+            var b: [(x1: Float, y1: Float, x2: Float, y2: Float, confidence: Float)] = []
+            for _ in 0 ..< 5 { b = try sd.detect(img) }
+            let sdTime = Date().timeIntervalSince(tm) / 5
+            print(String(format: "%@ %dx%d: MLX %.3fs, sd.cpp %.3fs", (path as NSString).lastPathComponent, img.width,
+                         img.height, mlxTime, sdTime))
+            for f in a { print(String(format: "  mlx    [%.1f %.1f %.1f %.1f] %.3f", f.x1, f.y1, f.x2, f.y2, f.confidence)) }
+            for f in b { print(String(format: "  sd.cpp [%.1f %.1f %.1f %.1f] %.3f", f.x1, f.y1, f.x2, f.y2, f.confidence)) }
+        }
+    } catch { fail(error.localizedDescription) }
+    finish(0)
 }
 
 if let esrganTest {
@@ -166,6 +208,58 @@ if let esrganTest {
         print(String(format: "PSNR MLX vs sd.cpp: %.2f dB", 10 * log10(255 * 255 / mse)))
     } catch { fail(error.localizedDescription) }
     finish(0)
+}
+
+/// WAI-ANIMA face repair. `--detect-engine mlx` (default, as the app): MLX detector + the ADetailer geometry in
+/// Swift, each crop repainted by stable-diffusion.cpp's masked img2img. `sdcpp`: stable-diffusion.cpp's ADetailer.
+/// `dp.inpaintSize` 0 = the app's rule (768 px unless a face crop is larger).
+func animaFaceRepair(_ engine: SDCppEngine, _ img: RGBImage, _ dp: SDCppDetailParameters, detectorPath: String) throws -> RGBImage {
+    if detectEngine == "sdcpp" {
+        var d = dp
+        if d.inpaintSize == 0 { d.inpaintSize = 1024 }
+        let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: detectorPath))
+        return try engine.detail(img, detector: detector, d) { _, done, total in
+            if total > 0 { showProgress("face", Int(done), Int(total)) }
+        }
+    }
+    let t0 = Date()
+    let detector = try YOLOFaceDetector(url: URL(fileURLWithPath: detectorPath))
+    _ = detector.detect(rgb: img.pixels, width: img.width, height: img.height)   // warm-up, as the app's cached detector
+    let t1 = Date()
+    let faces = detector.detect(rgb: img.pixels, width: img.width, height: img.height, confidence: dp.confidence)
+    let t2 = Date()
+    var repaintTime = 0.0
+    var settings = FaceRepairSettings()
+    settings.strength = dp.strength
+    settings.padding = dp.padding
+    settings.maskBlur = dp.maskBlur
+    let size = dp.inpaintSize > 0 ? dp.inpaintSize : (FaceRepairGeometry.largestCrop(faces, settings: settings) > 768 ? 1024 : 768)
+    settings.inpaintSize = size
+    let fixed = try FaceRepairGeometry.apply(rgb: img.pixels, width: img.width, height: img.height, faces: faces,
+                                             settings: settings) { crop, mask, i in
+        var p = SDCppParameters(prompt: dp.prompt)
+        p.loras = dp.loras
+        p.negativePrompt = dp.negativePrompt
+        p.steps = dp.steps
+        p.cfg = dp.cfg
+        p.sampler = dp.sampler
+        p.scheduler = dp.scheduler
+        p.seed = dp.seed &+ Int64(i)
+        p.stepCache = dp.stepCache
+        p.width = size
+        p.height = size
+        p.initImage = RGBImage(width: size, height: size, pixels: Data(crop))
+        p.maskImage = Data(mask.map { $0 > 0 ? 255 : 0 })
+        p.strength = dp.strength
+        let tr = Date()
+        let out = try engine.generate(p) { _, done, total in if total > 0 { showProgress("face", Int(done), Int(total)) } }
+        repaintTime += Date().timeIntervalSince(tr)
+        return [UInt8](out.pixels)
+    }
+    let geometry = Date().timeIntervalSince(t2) - repaintTime
+    FileHandle.standardError.write(Data(String(format: "\n[mlx face] load+warm-up %.3fs, detect %.3fs, crop/blend %.3fs, repaint %.2fs\n",
+                                               t1.timeIntervalSince(t0), t2.timeIntervalSince(t1), geometry, repaintTime).utf8))
+    return RGBImage(width: img.width, height: img.height, pixels: fixed)
 }
 
 if let diffusionPath {
@@ -219,6 +313,12 @@ if let diffusionPath {
             diffusionModel: URL(fileURLWithPath: diffusionPath), llm: URL(fileURLWithPath: llmPath),
             vae: URL(fileURLWithPath: vaePath), weightType: weightType)
         if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
+        if teEngine == "mlx" {
+            let tt = Date()
+            engine.externalTextEncoder = try Qwen3TextEncoder(url: URL(fileURLWithPath: llmPath))
+            print(String(format: "MLX Qwen3 text encoder loaded in %.2fs (hook %@)", Date().timeIntervalSince(tt),
+                         engine.externalTextEncoderActive ? "active" : "NOT active"))
+        }
         if ditEngine == "mlx" {
             let td = Date()
             let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType)
@@ -263,11 +363,25 @@ if let diffusionPath {
         finish(0)
     }
 
+    if let benchTE {
+        // a 1-step 256x256 image per prompt: the stable-diffusion.cpp log has get_learned_condition's time
+        for (i, text) in benchTE.split(separator: "|").enumerated() {
+            var p = SDCppParameters(prompt: String(text))
+            p.negativePrompt = negative.isEmpty ? "worst quality, low quality \(i)" : negative + " \(i)"
+            p.width = 256
+            p.height = 256
+            p.steps = 1
+            let t = Date()
+            _ = try? engine.generate(p)
+            print(String(format: "prompt %d: image %.2fs", i + 1, Date().timeIntervalSince(t)))
+        }
+        finish(0)
+    }
+
     if let detailPath = detailOnly {
         // face repair alone on an existing image (WAI-ANIMA), to time and compare its settings
         guard let img = loadRGB(detailPath), let faceDetector else { fail("--detail-only needs an image and --face-repair") }
         do {
-            let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
             for run in 1 ... repeats {
                 let tf = Date()
                 var dp = SDCppDetailParameters(prompt: prompt)
@@ -279,11 +393,9 @@ if let diffusionPath {
                 dp.scheduler = schedulerName
                 dp.seed = Int64(truncatingIfNeeded: seed)
                 dp.strength = faceStrength
-                if let faceSize { dp.inpaintSize = faceSize }
+                dp.inpaintSize = faceSize ?? 0
                 dp.stepCache = faceCache
-                let fixed = try engine.detail(img, detector: detector, dp) { _, done, total in
-                    if total > 0 { showProgress("face", Int(done), Int(total)) }
-                }
+                let fixed = try animaFaceRepair(engine, img, dp, detectorPath: faceDetector)
                 FileHandle.standardError.write(Data("\n".utf8))
                 try Image(MLXArray(fixed.pixels, [fixed.height, fixed.width, 3], type: UInt8.self)).save(url: outputURL(run))
                 print(String(format: "face repair %.2fs (size %d, %d steps x %.2f) -> %@", Date().timeIntervalSince(tf),
@@ -321,7 +433,6 @@ if let diffusionPath {
                 // like the app: sd.cpp's ADetailer with this context (MLX model and VAE through the hooks)
                 try Image(MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self))
                     .save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
-                let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
                 let tf = Date()
                 var dp = SDCppDetailParameters(prompt: prompt)
                 dp.loras = p.loras
@@ -332,11 +443,9 @@ if let diffusionPath {
                 dp.scheduler = p.scheduler
                 dp.seed = p.seed
                 dp.strength = faceStrength
-                if let faceSize { dp.inpaintSize = faceSize }
+                dp.inpaintSize = faceSize ?? 0
                 dp.stepCache = faceCache
-                final = try engine.detail(img, detector: detector, dp) { _, done, total in
-                    if total > 0 { showProgress("face", Int(done), Int(total)) }
-                }
+                final = try animaFaceRepair(engine, img, dp, detectorPath: faceDetector)
                 FileHandle.standardError.write(Data("\n".utf8))
                 faceLine = String(format: " | face repair %.2fs", Date().timeIntervalSince(tf))
             }
@@ -443,9 +552,13 @@ if let diffusionPath {
     // face repair: stable-diffusion.cpp ADetailer with the same checkpoint (as the app does)
     var detailEngine: SDCppEngine?
     var detector: SDCppFaceDetector?
+    var mlxDetector: YOLOFaceDetector?
     if let faceDetector {
         do {
-            detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
+            if detectEngine == "sdcpp" || faceEngine == "sdcpp" {
+                detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
+            }
+            if detectEngine == "mlx" { mlxDetector = try YOLOFaceDetector(url: URL(fileURLWithPath: faceDetector)) }
             if faceEngine == "sdcpp" { detailEngine = try SDCppEngine(checkpoint: URL(fileURLWithPath: modelPath)) }
         } catch { fail("face repair setup: \(error.localizedDescription)") }
     }
@@ -469,12 +582,13 @@ if let diffusionPath {
                 if phase == .sample || phase == .hires, i > 0 { showProgress(phase.rawValue, i, n) }
             }
             FileHandle.standardError.write(Data("\n".utf8))
-            if detailEngine == nil, let detector {
+            if detailEngine == nil, detector != nil || mlxDetector != nil {
                 // MLX face repair: sd.cpp only finds the faces, this engine repaints them
                 let tf = Date()
                 try Image(image).save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
                 let rgb = RGBImage(width: image.dim(1), height: image.dim(0), pixels: image.asData(access: .copy).data)
-                let faces = try detector.detect(rgb).map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
+                let faces = try mlxDetector.map { $0.detect(rgb: rgb.pixels, width: rgb.width, height: rgb.height) }
+                    ?? detector!.detect(rgb).map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
                 let td = Date().timeIntervalSince(tf)
                 var settings = FaceRepairSettings()
                 settings.strength = faceStrength

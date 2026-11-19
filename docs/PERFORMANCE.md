@@ -286,7 +286,8 @@ stable-diffusion.cpp's ADetailer repainted each face crop at 1024×1024 (10 mask
 Fewer steps looked similar on this face too, but the job's step count is kept so the repair strength means
 what it did before. The app now detects the faces first and repaints at **768 px unless a face crop is larger than that**
 (close-ups keep 1024 px, so no detail is lost when the crop is pasted back), with the step cache when it's
-on: 5.1 s in the app test above. Images without a face skip the pass entirely. WAI v16's MLX face repair
+on: 5.1 s in the app test above. Images without a face skip the pass entirely. (Round 5 removed the second
+detection this needed.) WAI v16's MLX face repair
 (6 s) keeps 1024 px.
 
 ### Small: fp16 instead of bf16 for the MLX Anima model
@@ -303,13 +304,54 @@ A turbo / few-step distilled LoRA for WAI v16 was left out on purpose: it change
 `--cache mode[:key=value,...]` (WAI-ANIMA step cache), `--step-cache <threshold>` (WAI v16), `--face-size`,
 `--face-steps`, `--face-cache` and `--detail-only <image>` (WAI-ANIMA face repair on its own), `--anima-dtype f16`.
 
+## Round 5 (2026-11-20): the last two parts in MLX
+
+The two pieces of WAI-ANIMA still in stable-diffusion.cpp were small, but MLX runs both faster, so they moved.
+Measured with `WAIGEN_SDCPP_LOG=info`, which prints stable-diffusion.cpp's own stage timings.
+
+### Face detector (`YOLOFaceDetector.swift`), both models
+
+YOLOv8 (`face_yolov8m`, batch norms already folded) ported from stable-diffusion.cpp's `yolov8.h`, with the same
+letterbox (640 px, bilinear at half-pixel centres, grey 114 padding), DFL box decoding, confidence filter and
+per-class NMS as its `detailer.cpp`. Six test images (one to three faces):
+
+| | stable-diffusion.cpp | MLX (fp16) |
+|---|---|---|
+| Boxes | | same faces, same confidences, coordinates within 0.4 px |
+| Detection, warm | 0.068 s (0.27 s inside its ADetailer) | **0.011 s** |
+| Loading the detector | 0.20 s | 0.02 s |
+
+With it, WAI-ANIMA's face repair no longer goes through stable-diffusion.cpp's ADetailer: the MLX detector finds
+the faces, `FaceRepairGeometry` (the ADetailer geometry already ported for WAI v16) crops and blends them in Swift
+(0.010 s), and each crop is repainted by stable-diffusion.cpp's masked img2img (`SDCppParameters.maskImage`, the
+same call its ADetailer makes). Same image as before: **52.6 dB** against stable-diffusion.cpp's ADetailer. Per
+image with a face that saves ~0.5 s (round 4's size check had added a second detection), and WAI v16 no longer
+uses stable-diffusion.cpp at all.
+
+### WAI-ANIMA's text encoder (`Qwen3TextEncoder.swift`)
+
+Qwen3-0.6B in MLX (28 layers, grouped KV heads 16/8, RMSNorm on q and k, NEOX RoPE base 1e6, causal, final norm),
+behind a fourth hook in the patch (`sd_set_text_encoder_hook`): stable-diffusion.cpp still tokenizes (Qwen and T5
+tokenizers, prompt weights) and hands the token ids over. While the hook is set it never loads its own copy of
+the encoder (it used to load it, 1.2 GB, on the first image).
+
+My round-4 note said the encoder took 0.26 s per prompt; measured properly (five different prompts in one process):
+
+| | stable-diffusion.cpp | MLX bf16 | MLX float32 |
+|---|---|---|---|
+| First prompt after loading | 0.33 s (0.20 s of it loading the weights) | **0.08 s** | 0.08 s |
+| Each new prompt after that | 0.01-0.02 s | **0.01 s** | 0.02 s |
+| Output vs stable-diffusion.cpp | | cosine 0.99986 | cosine 0.9999997 |
+
+bf16 weights with float32 math matched exactly too but took 0.04 s (the weights get converted on every call).
+The images look the same with all three: Euler a turns even float32's 0.08 % difference into ~27 dB, the same as
+bf16's, and the side-by-side shows the same picture, so bf16 (fastest, 1.2 GB) is kept. A job with a LoRA the MLX
+models can't fully take (LoHa / LoKr, or text-encoder layers) still runs entirely in stable-diffusion.cpp.
+
+So the gain is ~0.25 s on the first image after the model loads and ~0.01 s per new prompt after that.
+
 ## Possible next steps
 
-- The Qwen3 text encoder of WAI-ANIMA and the face detector still run in stable-diffusion.cpp. Measured
-  (`WAIGEN_SDCPP_LOG=info` prints stable-diffusion.cpp's stage timings): the text encoder takes **0.26 s** for prompt
-  + negative the first time and ~0 s after that (stable-diffusion.cpp caches the last 4 encodings, so the hi-res
-  and face-repair passes reuse it); the YOLOv8 face detector takes **0.26 s** per image (the WAI-ANIMA face repair
-  runs it twice, once to pick the repaint size). Against a 76 s WAI-ANIMA job that is under 1 %, so porting them
-  to MLX isn't worth it.
+- Every model now runs in MLX; stable-diffusion.cpp keeps WAI-ANIMA's tokenizers, sampler and masked img2img.
 - What remains is mostly the models' own compute. Fewer model calls (Fast mode, Step cache, or both) is the
   remaining lever; they stack, but each changes the picture a little.

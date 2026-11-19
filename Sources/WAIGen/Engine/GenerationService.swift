@@ -88,7 +88,9 @@ final class GenerationService: @unchecked Sendable {
     private var sdcpp: [String: SDCppEngine] = [:]
     /// MLX diffusion models standing in for stable-diffusion.cpp's (WAI-ANIMA), by preset id
     private var mlxDiT: [String: MLXDiTBridge] = [:]
-    private var detector: SDCppFaceDetector?
+    /// MLX Qwen3 text encoders standing in for stable-diffusion.cpp's (WAI-ANIMA), by preset id
+    private var mlxTE: [String: Qwen3TextEncoder] = [:]
+    private var detector: YOLOFaceDetector?
     private var upscalers: [URL: ModelUpscaler] = [:]
     private var preloadSteps: [(name: String, load: () throws -> Void)] = []
     private var names: [String: String] = [:]   // preset id -> name, for the "in memory" list
@@ -113,6 +115,7 @@ final class GenerationService: @unchecked Sendable {
             self.preloadSteps.removeAll()
             self.sdcpp.removeAll()
             self.mlxDiT.removeAll()
+            self.mlxTE.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             self.mlx.removeAll()
@@ -183,6 +186,7 @@ final class GenerationService: @unchecked Sendable {
         mlx = mlx.filter { $0.key == id }
         sdcpp = sdcpp.filter { $0.key == id }
         mlxDiT = mlxDiT.filter { $0.key == id }
+        mlxTE = mlxTE.filter { $0.key == id }
         Memory.clearCache()
     }
 
@@ -210,15 +214,21 @@ final class GenerationService: @unchecked Sendable {
             e.externalDiffusion = bridge
             if e.externalDiffusionActive { mlxDiT[p.id] = bridge } else { e.externalDiffusion = nil }
         }
+        // and the Qwen3 text encoder's forward pass (tokenizing stays in sd.cpp; its copy is never loaded)
+        if let llm = p.llm, let te = try? Qwen3TextEncoder(url: file(llm)) {
+            e.externalTextEncoder = te
+            if e.externalTextEncoderActive { mlxTE[p.id] = te } else { e.externalTextEncoder = nil }
+        }
         sdcpp[p.id] = e
         names[p.id] = p.name
         reportModels()
         return e
     }
 
-    private func loadDetector(_ root: URL) throws -> SDCppFaceDetector {
+    /// YOLOv8 face detector in MLX (same boxes as stable-diffusion.cpp's, ~6x faster; docs/PERFORMANCE.md round 5)
+    private func loadDetector(_ root: URL) throws -> YOLOFaceDetector {
         if let d = detector { return d }
-        let d = try SDCppFaceDetector(model: root.appendingPathComponent("detectors/face_yolov8m.safetensors"))
+        let d = try YOLOFaceDetector(url: root.appendingPathComponent("detectors/face_yolov8m.safetensors"))
         detector = d
         return d
     }
@@ -282,6 +292,7 @@ final class GenerationService: @unchecked Sendable {
             self.mlx.removeAll()
             self.sdcpp.removeAll()
             self.mlxDiT.removeAll()
+            self.mlxTE.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             Memory.clearCache()
@@ -324,6 +335,9 @@ final class GenerationService: @unchecked Sendable {
             }
             let wanted: SDCppExternalDiffusion? = useMLX ? bridge : nil
             if (engine.externalDiffusion == nil) != (wanted == nil) { engine.externalDiffusion = wanted }
+            // a LoRA the MLX models can't fully take (it may also patch the text encoder) goes to sd.cpp whole
+            let wantedTE: SDCppExternalTextEncoder? = useMLX ? mlxTE[p.id] : nil
+            if (engine.externalTextEncoder == nil) != (wantedTE == nil) { engine.externalTextEncoder = wantedTE }
         }
         return engine
     }
@@ -560,48 +574,50 @@ final class GenerationService: @unchecked Sendable {
         if isCancelled { throw CancellationError() }
         let tf = Date()
         let detector = try loadDetector(job.modelsRoot)
+        let faces = detector.detect(rgb: image.pixels, width: image.width, height: image.height,
+                                    confidence: Float(fr.confidence))
+        guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
+        var settings = FaceRepairSettings()
+        settings.strength = Float(fr.strength)
         if job.preset.engine == .mlx {
-            // WAI v16: sd.cpp's YOLO only finds the faces; the MLX engine (already loaded, LoRAs
-            // applied) repaints them the way sd.cpp's ADetailer would, ~3x faster
-            let faces = try detector.detect(image, confidence: Float(fr.confidence))
-                .map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
-            guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
+            // WAI v16: the MLX engine (already loaded, LoRAs applied) repaints the faces the way
+            // stable-diffusion.cpp's ADetailer would, ~3x faster
             let engine = try loadMLX(job.preset, job.modelsRoot)
             var p = sdxlParameters(job)
             if !fr.prompt.isEmpty { p.prompt = fr.prompt }
-            var settings = FaceRepairSettings()
-            settings.strength = Float(fr.strength)
             let fixed = try engine.repairFaces(
                 rgb: image.pixels, width: image.width, height: image.height, faces: faces, p, settings: settings,
                 isCancelled: { self.isCancelled }) { _, step, total in progress(.faceRepair(step: step, total: total)) }
             return (RGBImage(width: image.width, height: image.height, pixels: fixed), Date().timeIntervalSince(tf))
         }
+        // WAI-ANIMA: the same geometry, each crop repainted by stable-diffusion.cpp's masked img2img (what its
+        // ADetailer runs), at 768 px unless a face crop is bigger than that (close-ups): half the time of
+        // 1024 px with the same look at the size the face is pasted back (docs/PERFORMANCE.md, round 4)
         let engine = try sdcppEngine(job, progress)
         setActive(engine)
         defer { setActive(nil) }
-        // WAI-ANIMA repaints the face crop at 768 px unless a face crop is bigger than that (close-ups): half the
-        // time of 1024 px and the same look at the size the face is pasted back (docs/PERFORMANCE.md, round 4)
-        let faces = try detector.detect(image, confidence: Float(fr.confidence))
-        guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
-        let largestCrop = faces.map { max($0.x2 - $0.x1, $0.y2 - $0.y1) }.max().map { Int($0) + 2 * 32 + 4 } ?? 0
-        var dp = SDCppDetailParameters(prompt: fr.prompt.isEmpty ? job.positive : fr.prompt)
-        dp.inpaintSize = largestCrop > Self.animaFaceSize ? 1024 : Self.animaFaceSize
-        if job.stepCache { dp.stepCache = Self.animaStepCache }
-        dp.loras = job.loras.map { SDCppLoRA(path: $0.url.path, multiplier: Float($0.strength)) }
-        dp.negativePrompt = job.negative
-        dp.steps = job.steps
-        dp.cfg = Float(job.cfg)
-        dp.sampler = job.sampler.sdcppName
-        dp.scheduler = job.scheduler.sdcppName
-        dp.seed = job.seed
-        dp.strength = Float(fr.strength)
-        dp.confidence = Float(fr.confidence)
-        let fixed = try engine.detail(image, detector: detector, dp) { stage, done, total in
-            if total > 0, !stage.lowercased().contains("decode") {
-                progress(.faceRepair(step: Int(done), total: Int(total)))
+        let size = FaceRepairGeometry.largestCrop(faces, settings: settings) > Self.animaFaceSize ? 1024 : Self.animaFaceSize
+        settings.inpaintSize = size
+        let fixed = try FaceRepairGeometry.apply(
+            rgb: image.pixels, width: image.width, height: image.height, faces: faces, settings: settings
+        ) { crop, mask, i in
+            if self.isCancelled { throw CancellationError() }
+            var sp = sdcppParameters(job)
+            if !fr.prompt.isEmpty { sp.prompt = fr.prompt }
+            sp.width = size
+            sp.height = size
+            sp.initImage = RGBImage(width: size, height: size, pixels: Data(crop))
+            sp.maskImage = Data(mask.map { $0 > 0 ? 255 : 0 })
+            sp.strength = Float(fr.strength)
+            sp.seed = job.seed &+ Int64(i)
+            let out = try engine.generate(sp) { stage, done, total in
+                if total > 0, !stage.lowercased().contains("decode") {
+                    progress(.faceRepair(step: Int(done), total: Int(total)))
+                }
             }
+            return [UInt8](out.pixels)
         }
-        return (fixed, Date().timeIntervalSince(tf))
+        return (RGBImage(width: image.width, height: image.height, pixels: fixed), Date().timeIntervalSince(tf))
     }
 
     private func result(_ image: RGBImage, start: Date, faceRepairSeconds: Double?) throws -> JobResult {

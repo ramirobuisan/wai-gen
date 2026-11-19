@@ -10,7 +10,7 @@ ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt)
 | Model | Engine |
 |---|---|
 | WAI-illustrious-SDXL v16 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
-| WAI-ANIMA v1.0 | **MLX** for the diffusion model, VAE and upscaler; **stable-diffusion.cpp** for the Qwen3 text encoder, sampler and face detector |
+| WAI-ANIMA v1.0 | **MLX** for the diffusion model, Qwen3 text encoder, VAE, upscaler and face detector; **stable-diffusion.cpp** for the tokenizers, sampler and masked img2img |
 
 Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-res, negatives).
 
@@ -45,6 +45,8 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 | WAI v16 face repair, one face | **~6 s** (MLX) | 17.3 s (stable-diffusion.cpp) |
 | WAI v16 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **31.6 s** | |
 | WAI-ANIMA face repair, one face | **~5-9 s** (768 px repaint) | ~16 s at 1024 px |
+| Face detector (YOLOv8m), warm | **0.011 s** (MLX) | 0.068-0.27 s (stable-diffusion.cpp) |
+| WAI-ANIMA text encoder, first prompt / later prompts | **0.08 s / 0.01 s** (MLX) | 0.33 s / 0.02 s |
 | WAI-ANIMA 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **76 s** | 157 s before the step cache, 750 s with stable-diffusion.cpp alone |
 
 The MLX VAE and upscaler match stable-diffusion.cpp's output (PSNR 53.9 dB and 60.6 dB). They are also
