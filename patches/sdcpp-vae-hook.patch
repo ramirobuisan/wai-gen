@@ -1,0 +1,114 @@
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+index c5a25c6..fea3f7e 100644
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -251,6 +251,19 @@ typedef void (*sd_generation_progress_cb_t)(const sd_generation_progress_t* prog
+ // Register/clear only while the context is idle. Passing NULL clears the callback.
+ SD_API void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_cb_t cb, void* data);
+ 
++// External VAE for single images (WAI Gen patch). direction 0 = encode: input is an image [W,H,C,N]
++// (ggml order, i.e. NCHW in C order) with values in 0..1; output is the VAE latent [W/f,H/f,Cz,N]
++// before the model's latent normalization. direction 1 = decode: VAE latent in, image in 0..1 out.
++// The output buffer is preallocated with output_shape. Return false to use the built-in VAE.
++// Register/clear only while the context is idle. Passing NULL clears it.
++typedef bool (*sd_vae_hook_t)(int direction,
++                              const float* input,
++                              const int64_t* input_shape,
++                              float* output,
++                              const int64_t* output_shape,
++                              void* data);
++SD_API void sd_set_vae_hook(sd_ctx_t* ctx, sd_vae_hook_t hook, void* data);
++
+ typedef struct {
+     int sample_pass;
+     int total_steps;
+diff --git a/src/api/api.cpp b/src/api/api.cpp
+index 72cd6d4..5917dce 100644
+--- a/src/api/api.cpp
++++ b/src/api/api.cpp
+@@ -90,6 +90,17 @@ void sd_set_generation_progress_callback(sd_ctx_t* ctx, sd_generation_progress_c
+     }
+ }
+ 
++void sd_set_vae_hook(sd_ctx_t* ctx, sd_vae_hook_t hook, void* data) {
++    if (ctx == nullptr || ctx->sd == nullptr) {
++        return;
++    }
++    std::lock_guard<std::recursive_mutex> lock(ctx->sd->execution_mutex);
++    if (!ctx->sd->executing_) {
++        ctx->sd->vae_hook      = hook;
++        ctx->sd->vae_hook_data = data;
++    }
++}
++
+ static sd_ctx_t* create_context(const sd::ContextConfig& params) {
+     auto engine = std::make_unique<StableDiffusionGGML>();
+     if (!engine->init(&params))
+diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
+index c2ae6b8..699d0b5 100644
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -3043,8 +3043,34 @@ int StableDiffusionGGML::align_video_frames(int frames) {
+     return latent_frames_to_video_frames(video_frames_to_latent_frames(frames));
+ }
+ 
++sd::Tensor<float> StableDiffusionGGML::run_vae_hook(int direction,
++                                                    const sd::Tensor<float>& input,
++                                                    std::vector<int64_t> output_shape) {
++    if (vae_hook == nullptr || input.dim() != 4) {
++        return {};
++    }
++    int64_t t0 = ggml_time_ms();
++    sd::Tensor<float> output(output_shape);
++    if (!vae_hook(direction, input.data(), input.shape().data(), output.data(), output.shape().data(), vae_hook_data)) {
++        LOG_WARN("external vae %s failed, using the built-in vae", direction == 0 ? "encode" : "decode");
++        return {};
++    }
++    LOG_INFO("external vae %s %lldx%lld completed, taking %.2fs", direction == 0 ? "encode" : "decode",
++             (long long)(direction == 0 ? input.shape()[0] : output_shape[0]),
++             (long long)(direction == 0 ? input.shape()[1] : output_shape[1]),
++             (ggml_time_ms() - t0) * 1.0f / 1000);
++    return output;
++}
++
+ sd::Tensor<float> StableDiffusionGGML::encode_to_vae_latents(const sd::Tensor<float>& x) {
+     generation_progress.report("vae_encode");
++    if (vae_hook != nullptr && x.dim() == 4) {
++        const int64_t f = first_stage_model->get_scale_factor();
++        auto hooked     = run_vae_hook(0, x, {x.shape()[0] / f, x.shape()[1] / f, (int64_t)get_latent_channel(), x.shape()[3]});
++        if (!hooked.empty()) {
++            return first_stage_model->vae_output_to_latents(hooked, rng);
++        }
++    }
+     auto latents = first_stage_model->encode(n_threads, x, vae_tiling_params, circular_x, circular_y);
+     if (latents.empty()) {
+         return {};
+@@ -3073,6 +3099,13 @@ sd::Tensor<float> StableDiffusionGGML::decode_first_stage(const sd::Tensor<float
+                                             ? sd::ops::slice(x, 3, 0, get_latent_channel())
+                                             : x;
+     auto latents                      = first_stage_model->diffusion_to_vae_latents(image_latents);
++    if (vae_hook != nullptr && latents.dim() == 4) {
++        const int64_t f = first_stage_model->get_scale_factor();
++        auto hooked     = run_vae_hook(1, latents, {latents.shape()[0] * f, latents.shape()[1] * f, 3, latents.shape()[3]});
++        if (!hooked.empty()) {
++            return hooked;
++        }
++    }
+     auto tiling_params                = first_stage_model->resolve_tiling_params(vae_tiling_params);
+     const bool prefer_temporal_tiling = decode_video && latents.dim() == 5 && latents.shape()[2] > 1 &&
+                                         first_stage_model->can_temporal_tile_decode();
+diff --git a/src/pipeline/diffusion_engine.h b/src/pipeline/diffusion_engine.h
+index ae05dc9..239229a 100644
+--- a/src/pipeline/diffusion_engine.h
++++ b/src/pipeline/diffusion_engine.h
+@@ -208,6 +208,10 @@ public:
+     std::vector<ModelManager::LoraSpec> conditioning_loras_;
+     bool executing_ = false;
+     sd::GenerationProgress generation_progress;
++    // external VAE for single images (sd_set_vae_hook)
++    sd_vae_hook_t vae_hook = nullptr;
++    void* vae_hook_data    = nullptr;
++    sd::Tensor<float> run_vae_hook(int direction, const sd::Tensor<float>& input, std::vector<int64_t> output_shape);
+ 
+     std::shared_ptr<Denoiser> denoiser;
+     std::vector<float> file_alphas_cumprod;

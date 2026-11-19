@@ -1,0 +1,255 @@
+// WAI-illustrious (SDXL, eps-prediction) text-to-image on MLX.
+
+import Foundation
+import MLX
+import MLXNN
+import MLXRandom
+
+public struct SDXLParameters: Sendable {
+    public var prompt: String
+    public var negativePrompt: String = ""
+    public var width = 832
+    public var height = 1216
+    public var steps = 28
+    public var cfg: Float = 6
+    public var sampler: SamplerKind = .eulerAncestral
+    public var scheduler: SchedulerKind = .normal
+    public var seed: UInt64 = 0
+
+    /// Hi-res fix: second pass at `hiresScale` x the base size. nil = off.
+    public var hiresScale: Float? = nil
+    public var hiresSteps = 15
+    public var hiresDenoise: Float = 0.4
+
+    public init(prompt: String) { self.prompt = prompt }
+}
+
+/// Timings of one generation, in seconds.
+public struct GenerationTimings: Sendable {
+    public var textEncode: Double = 0
+    public var sampling: Double = 0
+    public var samplingSteps = 0
+    public var hiresSampling: Double = 0
+    public var hiresSteps = 0
+    public var decode: Double = 0
+    public var total: Double = 0
+}
+
+public enum GenerationPhase: String, Sendable { case encode, sample, hires, decode }
+
+/// Thrown by `WaiSDXL.generate` when the caller cancels.
+public struct WaiCancelled: Error {}
+
+public final class WaiSDXL {
+    public let checkpoint: URL
+    let unet: UNetModel
+    let clipL: CLIPTextModel
+    let clipG: CLIPTextModel
+    let vae: Autoencoder
+    let tokenizer: CLIPTokenizer
+    let schedule = DiscreteSchedule()
+    let dtype: DType = .float16
+
+    public init(checkpoint: URL) throws {
+        self.checkpoint = checkpoint
+        let parts = try loadSDXLCheckpoint(url: checkpoint, dType: dtype)
+        unet = parts.unet
+        clipL = parts.clipL
+        clipG = parts.clipG
+        vae = parts.vae
+        tokenizer = try loadCLIPTokenizer()
+        eval(unet, clipL, clipG, vae)
+        // keep MLX's buffer cache bounded so repeated generations don't push the Mac into swap
+        Memory.cacheLimit = 2 << 30
+    }
+
+    let vaeDType: DType = .bfloat16
+    let lora = LoRAApplier()
+
+    /// Merge these LoRAs into the weights (undoing any previous set). No-op when unchanged.
+    @discardableResult
+    public func setLoRAs(_ specs: [LoRASpec]) throws -> LoRAReport {
+        try lora.apply(specs, unet: unet, clipL: clipL, clipG: clipG)
+    }
+
+    /// Image upscaler for the hi-res fix: gets the decoded base image (float32 [1, H, W, 3] in 0...1)
+    /// and the target width/height, returns float32 [1, targetH, targetW, 3] in 0...1.
+    public typealias HiresUpscaler = (MLXArray, Int, Int) throws -> MLXArray
+
+    /// Generate one image. Returns uint8 [H, W, 3]. Throws `WaiCancelled` when `isCancelled()`
+    /// turns true (checked before every sampling step). `hiresUpscale` replaces the built-in bicubic
+    /// upscale of the hi-res fix (e.g. an ESRGAN model).
+    /// SDXL latent -> RGB projection (ComfyUI latent_formats.SDXL), used for live previews.
+    static let previewFactors = MLXArray(converting: [
+        0.3651, 0.4232, 0.4341,
+        -0.2533, -0.0042, 0.1068,
+        0.1076, 0.1111, -0.0362,
+        -0.3165, -0.2492, -0.2188,
+    ]).reshaped(4, 3)
+    static let previewBias = MLXArray(converting: [0.1084, -0.0175, -0.0011])
+
+    /// `preview` gets a small uint8 RGB image [h/8, w/8, 3] of the predicted result after every
+    /// sampling step (base and hi-res pass). It is computed in the same evaluation as the step.
+    public func generate(
+        _ p: SDXLParameters,
+        hiresUpscale: HiresUpscaler? = nil,
+        isCancelled: () -> Bool = { false },
+        preview: ((MLXArray) -> Void)? = nil,
+        progress: (GenerationPhase, Int, Int) -> Void = { _, _, _ in }
+    ) throws -> (image: MLXArray, timings: GenerationTimings) {
+        let stepPreview = preview.map { deliver in
+            StepPreview(
+                make: { d in
+                    let rgb = matmul(d[0].asType(.float32), Self.previewFactors) + Self.previewBias
+                    return (clip((rgb + 1) / 2, min: 0, max: 1) * 255).round().asType(.uint8)
+                },
+                deliver: deliver)
+        }
+        defer { Memory.clearCache() }
+        var tm = GenerationTimings()
+        let t0 = Date()
+        MLXRandom.seed(p.seed)
+
+        // --- text conditioning
+        progress(.encode, 0, 1)
+        let (context, pooled) = encodeText(p)
+        tm.textEncode = Date().timeIntervalSince(t0)
+
+        // --- base pass
+        let w8 = p.width / 8 * 8
+        let h8 = p.height / 8 * 8
+        let sigmas = schedule.sigmas(steps: p.steps, scheduler: p.scheduler)
+        let noise = MLXRandom.normal([1, h8 / 8, w8 / 8, 4])
+        let x = noise * (1 + sigmas[0] * sigmas[0]).squareRoot()   // EPS max-denoise noise scaling
+
+        var ts = Date()
+        guard var latent = sample(
+            p.sampler,
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8),
+            x: x, sigmas: sigmas, isCancelled: isCancelled, preview: stepPreview, progress: { progress(.sample, $0, $1) })
+        else { throw WaiCancelled() }
+        tm.sampling = Date().timeIntervalSince(ts)
+        tm.samplingSteps = p.steps
+
+        // --- hi-res fix
+        if let scale = p.hiresScale, scale > 1, p.hiresSteps > 0, p.hiresDenoise > 0 {
+            ts = Date()
+            let hw = Int((Float(w8) * scale / 8).rounded()) * 8
+            let hh = Int((Float(h8) * scale / 8).rounded()) * 8
+            let image = vae.decode(latent.asType(vaeDType)).asType(.float32)   // [-1, 1], NHWC
+            latent = try refinePass(
+                image, context: context, pooled: pooled, p, width: hw, height: hh, upscale: hiresUpscale,
+                isCancelled: isCancelled, preview: stepPreview, progress: progress)
+            tm.hiresSampling = Date().timeIntervalSince(ts)
+            tm.hiresSteps = p.hiresSteps
+        }
+
+        // --- decode
+        ts = Date()
+        progress(.decode, 0, 1)
+        var img = vae.decode(latent.asType(vaeDType)).asType(.float32)
+        img = (clip(img / 2 + 0.5, min: 0, max: 1) * 255).round().asType(.uint8)
+        let out = img[0]
+        eval(out)
+        tm.decode = Date().timeIntervalSince(ts)
+        tm.total = Date().timeIntervalSince(t0)
+        return (out, tm)
+    }
+
+    /// Upscale + detail pass on an existing image (gallery "Upscale"): uses `p.prompt`,
+    /// `p.negativePrompt`, `p.seed`, `p.cfg`, sampler/scheduler and `p.hiresSteps` / `p.hiresDenoise`.
+    /// `image` is uint8 [H, W, 3]; returns uint8 [height, width, 3] (sizes rounded to multiples of 8).
+    public func refine(
+        _ image: MLXArray, _ p: SDXLParameters, width: Int, height: Int,
+        upscale: HiresUpscaler? = nil,
+        isCancelled: () -> Bool = { false },
+        preview: ((MLXArray) -> Void)? = nil,
+        progress: (GenerationPhase, Int, Int) -> Void = { _, _, _ in }
+    ) throws -> MLXArray {
+        defer { Memory.clearCache() }
+        MLXRandom.seed(p.seed)
+        progress(.encode, 0, 1)
+        let (context, pooled) = encodeText(p)
+        let stepPreview = preview.map { deliver in
+            StepPreview(
+                make: { d in
+                    let rgb = matmul(d[0].asType(.float32), Self.previewFactors) + Self.previewBias
+                    return (clip((rgb + 1) / 2, min: 0, max: 1) * 255).round().asType(.uint8)
+                },
+                deliver: deliver)
+        }
+        let src = image.asType(.float32)[.newAxis] / 127.5 - 1      // [-1, 1], NHWC
+        let latent = try refinePass(
+            src, context: context, pooled: pooled, p, width: width / 8 * 8, height: height / 8 * 8, upscale: upscale,
+            isCancelled: isCancelled, preview: stepPreview, progress: progress)
+        progress(.decode, 0, 1)
+        let img = vae.decode(latent.asType(vaeDType)).asType(.float32)
+        let out = (clip(img / 2 + 0.5, min: 0, max: 1) * 255).round().asType(.uint8)[0]
+        eval(out)
+        return out
+    }
+
+    private func encodeText(_ p: SDXLParameters) -> (MLXArray, MLXArray) {
+        let cond = encodeSDXL(p.prompt, tokenizer: tokenizer, clipL: clipL, clipG: clipG)
+        let uncond = encodeSDXL(p.negativePrompt, tokenizer: tokenizer, clipL: clipL, clipG: clipG)
+        let (ctxC, ctxU) = matchContextLength(cond.context, uncond.context)
+        let context = concatenated([ctxC, ctxU], axis: 0).asType(dtype)
+        let pooled = concatenated([cond.pooled, uncond.pooled], axis: 0).asType(dtype)
+        eval(context, pooled)
+        return (context, pooled)
+    }
+
+    /// Hi-res style pass: upscale `image` ([-1, 1] NHWC) to width x height (model upscaler or
+    /// bicubic), VAE-encode it and denoise the tail of the schedule (like ComfyUI's KSampler denoise).
+    private func refinePass(
+        _ image: MLXArray, context: MLXArray, pooled: MLXArray, _ p: SDXLParameters, width hw: Int, height hh: Int,
+        upscale: HiresUpscaler?, isCancelled: () -> Bool, preview: StepPreview?,
+        progress: (GenerationPhase, Int, Int) -> Void
+    ) throws -> MLXArray {
+        var image = image
+        if let upscale {
+            image = try upscale(clip(image / 2 + 0.5, min: 0, max: 1), hw, hh) * 2 - 1
+        }
+        if image.dim(1) != hh || image.dim(2) != hw { image = resize(image, height: hh, width: hw) }
+        var (x0, _) = vae.encode(clip(image, min: -1, max: 1).asType(vaeDType))
+        x0 = x0.asType(.float32)
+        let total = Int(Float(p.hiresSteps) / min(p.hiresDenoise, 1))
+        let full = schedule.sigmas(steps: total, scheduler: p.scheduler)
+        let hs = Array(full.suffix(p.hiresSteps + 1))
+        let xh = x0 + MLXRandom.normal(x0.shape) * hs[0]
+        guard let latent = sample(
+            p.sampler,
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: hw, height: hh),
+            x: xh, sigmas: hs, isCancelled: isCancelled, preview: preview, progress: { progress(.hires, $0, $1) })
+        else { throw WaiCancelled() }
+        return latent
+    }
+
+    /// CFG denoiser around the UNet (eps prediction -> denoised latent).
+    func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int) -> Denoiser {
+        let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
+            .reshaped(1, 6)
+        let textTime = (pooled, tiled(ids, repetitions: [2, 1]).asType(dtype))
+        let unet = self.unet
+        let schedule = self.schedule
+        let dtype = self.dtype
+        return { x, sigma in
+            let cIn = 1 / (sigma * sigma + 1).squareRoot()
+            let t = schedule.timestep(sigma)
+            let xIn = (concatenated([x, x], axis: 0) * cIn).asType(dtype)
+            let eps = unet(xIn, timestep: MLXArray([t, t]), encoderX: context, textTime: textTime)
+            let (epsC, epsU) = eps.split()
+            let e = (epsU + cfg * (epsC - epsU)).asType(x.dtype)
+            return x - sigma * e
+        }
+    }
+
+    /// Bicubic resize of an NHWC image to an exact size.
+    func resize(_ x: MLXArray, height: Int, width: Int) -> MLXArray {
+        let sy = Float(height) / Float(x.dim(1))
+        let sx = Float(width) / Float(x.dim(2))
+        let up = Upsample(scaleFactor: [sy, sx], mode: .cubic(alignCorners: false))
+        let y = up(x)
+        return y[0..., ..<height, ..<width, 0...]
+    }
+}
