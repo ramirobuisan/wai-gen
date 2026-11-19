@@ -195,7 +195,7 @@ struct SettingsView: View {
                 Text("When the app opens and when you pick another model, so the first image doesn't wait for them.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Keep every image model loaded", isOn: $keepAllLoaded)
-                Text("Off: only the selected model stays in memory. On: switching between WAI v16, v12 and WAI-ANIMA is instant (about 14 GB with face repair).")
+                Text("Off: only the selected model stays in memory. On: switching between WAI v16, v12 and WAI-ANIMA is instant, at the cost of more memory.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Free the memory after", selection: $idleMinutes) {
                     Text("5 minutes idle").tag(5)

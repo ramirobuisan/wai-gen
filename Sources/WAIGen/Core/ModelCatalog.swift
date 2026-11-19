@@ -139,7 +139,7 @@ enum ModelCatalog {
             diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
             defaults: PresetDefaults(
                 width: 1024, height: 1344, steps: 28, cfg: 6, sampler: .eulerA, scheduler: .normal,
-                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 20, hiresDenoise: 0.4, maxHiresScale: 2,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
                 qualityPrefix: "masterpiece, best quality, amazing quality", negative: waiNegative),
             source: "Civitai 827184 v16.0: Euler a, 15-30 steps, CFG 5-7, >1024², hires 1.5x/20 steps/denoise 0.35-0.5"),
         ModelPreset(
@@ -148,7 +148,7 @@ enum ModelCatalog {
             diffusionModel: nil, llm: nil, vae: nil, characterList: .wai120,
             defaults: PresetDefaults(
                 width: 1024, height: 1344, steps: 30, cfg: 6, sampler: .eulerA, scheduler: .normal,
-                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 20, hiresDenoise: 0.4, maxHiresScale: 2,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
                 qualityPrefix: "masterpiece, best quality, amazing quality", negative: waiNegative),
             source: "Civitai 827184 v12.0: Euler a, 25-40 steps, CFG 5-7, >1024², hires 1.5x/20 steps/denoise 0.35-0.5"),
         ModelPreset(
@@ -158,7 +158,7 @@ enum ModelCatalog {
             characterList: .anima,
             defaults: PresetDefaults(
                 width: 1024, height: 1344, steps: 25, cfg: 4.5, sampler: .eulerA, scheduler: .normal,
-                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 20, hiresDenoise: 0.4, maxHiresScale: 1.5,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 1.5,
                 qualityPrefix: "masterpiece, best quality, score_7", negative: animaNegative),
             source: "Civitai 2544636 v1.0: Euler a normal, 20-30 steps, CFG 4-5, hires ≤1.5x/20 steps/denoise 0.35-0.5"),
     ]

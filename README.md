@@ -44,12 +44,14 @@ The MLX VAE and upscaler match stable-diffusion.cpp's output (PSNR 53.9 dB and 6
 published on their own: [mlx-swift-qwen-image-vae](https://github.com/ramirobuisan/mlx-swift-qwen-image-vae)
 and [mlx-swift-realesrgan](https://github.com/ramirobuisan/mlx-swift-realesrgan).
 
+More numbers, including what was tried and dropped: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Changes: [CHANGELOG.md](CHANGELOG.md).
+
 ## Build
 
 Requirements: Apple silicon, macOS 14+, Xcode 16+, CMake.
 
 ```bash
-scripts/build-sdcpp.sh          # stable-diffusion.cpp at the tested commit + patches/sdcpp-vae-hook.patch
+scripts/build-sdcpp.sh          # stable-diffusion.cpp at the tested commit + patches/stable-diffusion.cpp.patch
 scripts/make-app.sh --install   # Release build -> ~/Applications/WAI Gen.app
 swift scripts/make-icon.swift   # only to redraw the app icon (Resources/AppIcon.icns)
 ```
@@ -77,7 +79,7 @@ data (or copied from an existing SAA install).
 ## How the WAI-ANIMA speed-up works
 
 stable-diffusion.cpp runs WAI-ANIMA's Qwen-Image (Wan 2.1) VAE through ggml's 3D convolutions, which
-take minutes at hi-res sizes on Metal. `patches/sdcpp-vae-hook.patch` adds `sd_set_vae_hook()`: when an
+take minutes at hi-res sizes on Metal. `patches/stable-diffusion.cpp.patch` adds `sd_set_vae_hook()`: when an
 app registers it, every single-image VAE encode/decode in that context (txt2img, img2img, hi-res, face
 repair) calls the app instead, and stable-diffusion.cpp keeps doing the latent normalisation. WAI Gen
 answers with an MLX implementation of the VAE. For one frame the causal 3D VAE is exactly a 2D VAE

@@ -84,8 +84,6 @@ final class GenerationService: @unchecked Sendable {
     // everything below is only touched on `queue`
     private var mlx: [String: WaiSDXL] = [:]
     private var sdcpp: [String: SDCppEngine] = [:]
-    /// stable-diffusion.cpp contexts with the same SDXL checkpoint, for face repair of MLX images
-    private var detailCtx: [String: SDCppEngine] = [:]
     private var detector: SDCppFaceDetector?
     private var upscalers: [URL: ModelUpscaler] = [:]
     private var preloadSteps: [(name: String, load: () throws -> Void)] = []
@@ -110,7 +108,6 @@ final class GenerationService: @unchecked Sendable {
             self.setActive(nil)
             self.preloadSteps.removeAll()
             self.sdcpp.removeAll()
-            self.detailCtx.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             self.mlx.removeAll()
@@ -180,7 +177,6 @@ final class GenerationService: @unchecked Sendable {
         guard !Self.keepAllLoaded else { return }
         mlx = mlx.filter { $0.key == id }
         sdcpp = sdcpp.filter { $0.key == id }
-        detailCtx = detailCtx.filter { $0.key == id }
         Memory.clearCache()
     }
 
@@ -208,14 +204,6 @@ final class GenerationService: @unchecked Sendable {
         return e
     }
 
-    private func loadDetail(_ p: ModelPreset, _ root: URL) throws -> SDCppEngine {
-        if let e = detailCtx[p.id] { return e }
-        let e = try SDCppEngine(checkpoint: root.appendingPathComponent(p.checkpoint ?? ""))
-        detailCtx[p.id] = e
-        reportModels()
-        return e
-    }
-
     private func loadDetector(_ root: URL) throws -> SDCppFaceDetector {
         if let d = detector { return d }
         let d = try SDCppFaceDetector(model: root.appendingPathComponent("detectors/face_yolov8m.safetensors"))
@@ -237,8 +225,7 @@ final class GenerationService: @unchecked Sendable {
             for p in presets where p.missingFiles(in: root).isEmpty {
                 switch p.engine {
                 case .mlx:
-                    steps.append((p.name, { _ = try self.loadMLX(p, root) }))
-                    if faceRepair { steps.append((p.name + " face repair", { _ = try self.loadDetail(p, root) })) }
+                    steps.append((p.name, { _ = try self.loadMLX(p, root) }))   // repaints faces itself
                 case .sdcpp:
                     steps.append((p.name, { _ = try self.loadSDCpp(p, root) }))
                 }
@@ -282,7 +269,6 @@ final class GenerationService: @unchecked Sendable {
             self.preloadSteps.removeAll()
             self.mlx.removeAll()
             self.sdcpp.removeAll()
-            self.detailCtx.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             Memory.clearCache()
@@ -308,19 +294,6 @@ final class GenerationService: @unchecked Sendable {
         let p = job.preset
         if sdcpp[p.id] == nil { progress(.loadingModel(p.name)) }
         return try loadSDCpp(p, job.modelsRoot)
-    }
-
-    /// Engine that repaints faces: the sd.cpp context itself, or (for MLX models) an sd.cpp
-    /// context with the same checkpoint.
-    private func repairEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> SDCppEngine {
-        let p = job.preset
-        switch p.engine {
-        case .sdcpp:
-            return try sdcppEngine(job, progress)
-        case .mlx:
-            if detailCtx[p.id] == nil { progress(.loadingFaceRepair) }
-            return try loadDetail(p, job.modelsRoot)
-        }
     }
 
     private func modelUpscaler(_ url: URL) throws -> ModelUpscaler {
@@ -546,7 +519,23 @@ final class GenerationService: @unchecked Sendable {
         if isCancelled { throw CancellationError() }
         let tf = Date()
         let detector = try loadDetector(job.modelsRoot)
-        let engine = try repairEngine(job, progress)
+        if job.preset.engine == .mlx {
+            // WAI v16 / v12: sd.cpp's YOLO only finds the faces; the MLX engine (already loaded, LoRAs
+            // applied) repaints them the way sd.cpp's ADetailer would, ~3x faster
+            let faces = try detector.detect(image, confidence: Float(fr.confidence))
+                .map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
+            guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
+            let engine = try loadMLX(job.preset, job.modelsRoot)
+            var p = sdxlParameters(job)
+            if !fr.prompt.isEmpty { p.prompt = fr.prompt }
+            var settings = FaceRepairSettings()
+            settings.strength = Float(fr.strength)
+            let fixed = try engine.repairFaces(
+                rgb: image.pixels, width: image.width, height: image.height, faces: faces, p, settings: settings,
+                isCancelled: { self.isCancelled }) { _, step, total in progress(.faceRepair(step: step, total: total)) }
+            return (RGBImage(width: image.width, height: image.height, pixels: fixed), Date().timeIntervalSince(tf))
+        }
+        let engine = try sdcppEngine(job, progress)
         setActive(engine)
         defer { setActive(nil) }
         var dp = SDCppDetailParameters(prompt: fr.prompt.isEmpty ? job.positive : fr.prompt)

@@ -231,6 +231,20 @@ public final class SDCppFaceDetector: @unchecked Sendable {
         handle = h
     }
 
+    /// Run only the YOLO detector (WAI Gen sd.cpp patch): face boxes as (x1, y1, x2, y2, confidence)
+    /// in pixels, in ADetailer's order.
+    public func detect(_ image: RGBImage, confidence: Float = 0.3) throws -> [(x1: Float, y1: Float, x2: Float, y2: Float, confidence: Float)] {
+        var boxes = [Float](repeating: 0, count: 64 * 5)
+        let n = image.pixels.withUnsafeBytes { raw in
+            sd_adetailer_detect(handle, raw.bindMemory(to: UInt8.self).baseAddress, Int32(image.width), Int32(image.height),
+                                confidence, &boxes, 64)
+        }
+        guard n >= 0 else { throw SDCppError.generation("face detection failed") }
+        return (0 ..< min(Int(n), 64)).map { i in
+            (boxes[i * 5], boxes[i * 5 + 1], boxes[i * 5 + 2], boxes[i * 5 + 3], boxes[i * 5 + 4])
+        }
+    }
+
     deinit { sd_adetailer_free(handle) }
 }
 
@@ -273,9 +287,11 @@ public final class SDCppEngine: @unchecked Sendable {
     }
 
     /// Anima-style model: standalone diffusion model + LLM text encoder + VAE.
-    public convenience init(diffusionModel: URL, llm: URL, vae: URL, flashAttention: Bool = true) throws {
+    /// `weightType`: convert the weights at load time (e.g. "q8_0"); nil keeps the file's types.
+    public convenience init(diffusionModel: URL, llm: URL, vae: URL, flashAttention: Bool = true,
+                            weightType: String? = nil) throws {
         try self.init(paths: ["diffusion_model_path": diffusionModel.path, "llm_path": llm.path, "vae_path": vae.path],
-                      flashAttention: flashAttention)
+                      flashAttention: flashAttention, weightType: weightType)
     }
 
     /// Single-file checkpoint (e.g. WAI-illustrious SDXL), used for ADetailer repaints.
@@ -283,7 +299,7 @@ public final class SDCppEngine: @unchecked Sendable {
         try self.init(paths: ["model_path": checkpoint.path], flashAttention: flashAttention)
     }
 
-    private init(paths: [String: String], flashAttention: Bool) throws {
+    private init(paths: [String: String], flashAttention: Bool, weightType: String? = nil) throws {
         _ = installLogger
         guard let opt = sd_ctx_opt_create() else { throw SDCppError.setup("out of memory") }
         defer { sd_opt_free(opt) }
@@ -293,6 +309,7 @@ public final class SDCppEngine: @unchecked Sendable {
         // this stable-diffusion.cpp version ("pre-allocated tensor ... cannot run the operation (ADD)").
         // Applying them during compute works.
         try check(sd_opt_set_string(opt, "lora_apply_mode", "at_runtime"), "lora_apply_mode")
+        if let weightType { try check(sd_opt_set_string(opt, "wtype", weightType), "wtype") }
         var c: OpaquePointer?
         try check(sd_ctx_create(opt, &c), "loading models")
         ctx = c

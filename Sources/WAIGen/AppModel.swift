@@ -137,6 +137,11 @@ final class AppModel {
         guard !started else { return }
         started = true
         if let upgraded = ModelCatalog.legacyNegatives[settings.negative] { settings.negative = upgraded }
+        // 2026-11: the presets went from 20 to 15 hi-res steps (same look, a quarter less hi-res time)
+        if UserDefaults.standard.integer(forKey: "settingsRevision") < 2 {
+            if settings.hiresSteps == 20 { settings.hiresSteps = preset.defaults.hiresSteps }
+            UserDefaults.standard.set(2, forKey: "settingsRevision")
+        }
         service.onModelsChanged = { loaded, loading in
             Task { @MainActor in
                 self.loadedModels = loaded

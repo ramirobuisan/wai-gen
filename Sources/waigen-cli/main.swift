@@ -29,6 +29,15 @@ func take(_ names: String...) -> String? {
     return v
 }
 
+/// Upscaler model: MLX for ESRGAN (RRDBNet) files, stable-diffusion.cpp otherwise (same as the app).
+func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
+    if let esrgan = try? RealESRGAN(url: URL(fileURLWithPath: path)) {
+        let out = esrgan.upscale(MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self))
+        return RGBImage(width: out.dim(1), height: out.dim(0), pixels: out.asData(access: .copy).data)
+    }
+    return try SDCppUpscaler(model: URL(fileURLWithPath: path)).upscale(img)
+}
+
 /// MLX VAE for stable-diffusion.cpp's single-image encode/decode
 final class MLXVAEBridge: SDCppExternalVAE {
     let vae: QwenImageVAE
@@ -62,6 +71,7 @@ let hiresDenoise = take("--hires-denoise").flatMap(Float.init)
 var loraArgs = [String]()
 while let l = take("--lora") { loraArgs.append(l) }   // path[:strength], repeatable
 let loraSelfTest = take("--lora-selftest")
+let benchUNet = take("--bench-unet")   // WxH, e.g. 1024x1344: UNet s/step per image, batch 1 vs 2, compile off/on
 let loras: [LoRASpec] = loraArgs.map { a in
     let parts = a.split(separator: ":")
     let strength = parts.count > 1 ? Float(parts.last!) ?? 1 : 1
@@ -73,6 +83,7 @@ let previewDir = take("--preview-dir")   // save every step's live preview here 
 let refinePath = take("--refine")        // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
 let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (default) or sdcpp
+let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
 let vaeRoundtrip = take("--vae-roundtrip")         // encode + decode an image with the MLX VAE and exit
 let esrganTest = take("--esrgan-test")             // upscale an image with --hires-upscaler in MLX and sd.cpp, compare
 
@@ -93,6 +104,7 @@ func loadRGB(_ path: String) -> RGBImage? {
     return RGBImage(width: w, height: h, pixels: rgb)
 }
 let faceDetector = take("--face-repair")   // path to face_yolov8m.safetensors
+let faceEngine = take("--face-engine") ?? "mlx"   // face repainting for SDXL: mlx (default) or sdcpp
 let faceStrength = take("--face-strength").flatMap(Float.init) ?? 0.4
 let repeats = take("--repeat").flatMap(Int.init) ?? 1
 let output = take("--output", "-o") ?? "waigen.png"
@@ -168,7 +180,7 @@ if let diffusionPath {
     do {
         engine = try SDCppEngine(
             diffusionModel: URL(fileURLWithPath: diffusionPath), llm: URL(fileURLWithPath: llmPath),
-            vae: URL(fileURLWithPath: vaePath))
+            vae: URL(fileURLWithPath: vaePath), weightType: weightType)
         if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
     } catch { fail(error.localizedDescription) }
     print(String(format: "loaded %@ in %.1fs", (diffusionPath as NSString).lastPathComponent, Date().timeIntervalSince(t0)))
@@ -180,7 +192,7 @@ if let diffusionPath {
         do {
             let tw = Int(Double(img.width) * refineScale) / 16 * 16
             let th = Int(Double(img.height) * refineScale) / 16 * 16
-            if let hiresUpscalerPath { img = try SDCppUpscaler(model: URL(fileURLWithPath: hiresUpscalerPath)).upscale(img) }
+            if let hiresUpscalerPath { img = try upscaleImage(img, model: hiresUpscalerPath) }
             img = img.resized(width: tw, height: th)
             var p = SDCppParameters(prompt: prompt)
             p.negativePrompt = negative
@@ -255,6 +267,16 @@ if let diffusionPath {
     }
     print(String(format: "loaded %@ in %.1fs", (modelPath as NSString).lastPathComponent, Date().timeIntervalSince(tLoad)))
 
+    if let benchUNet {
+        let wh = benchUNet.split(separator: "x").compactMap { Int($0) }
+        guard wh.count == 2 else { fail("--bench-unet WxH") }
+        for (batch, compiled) in [(1, false), (1, true), (2, false), (2, true), (1, false), (1, true)] {
+            let s = engine.benchmarkUNet(batch: batch, width: wh[0], height: wh[1], compiled: compiled)
+            print(String(format: "%dx%d batch %d compile %@: %.3f s/step per image", wh[0], wh[1], batch,
+                         compiled ? "on " : "off", s))
+        }
+        finish(0)
+    }
     if let loraSelfTest {
         var p = params
         p.seed = seed
@@ -279,19 +301,16 @@ if let diffusionPath {
         } catch { fail("LoRA: \(error.localizedDescription)") }
     }
 
-    // hi-res upscaler model through stable-diffusion.cpp, resized to the hi-res size
+    // hi-res upscaler model (MLX for ESRGAN files), resized to the hi-res size
     var hiresUpscale: WaiSDXL.HiresUpscaler?
     if let hiresUpscalerPath {
-        do {
-            let up = try SDCppUpscaler(model: URL(fileURLWithPath: hiresUpscalerPath))
-            print("upscaler x\(up.scale): \((hiresUpscalerPath as NSString).lastPathComponent)")
-            hiresUpscale = { img, w, h in
-                let u8 = (img[0] * 255).round().asType(.uint8)
-                let rgb = RGBImage(width: u8.dim(1), height: u8.dim(0), pixels: u8.asData(access: .copy).data)
-                let big = try up.upscale(rgb).resized(width: w, height: h)
-                return MLXArray(big.pixels, [1, h, w, 3], type: UInt8.self).asType(.float32) / 255
-            }
-        } catch { fail("upscaler: \(error.localizedDescription)") }
+        print("upscaler: \((hiresUpscalerPath as NSString).lastPathComponent)")
+        hiresUpscale = { img, w, h in
+            let u8 = (img[0] * 255).round().asType(.uint8)
+            let rgb = RGBImage(width: u8.dim(1), height: u8.dim(0), pixels: u8.asData(access: .copy).data)
+            let big = try upscaleImage(rgb, model: hiresUpscalerPath).resized(width: w, height: h)
+            return MLXArray(big.pixels, [1, h, w, 3], type: UInt8.self).asType(.float32) / 255
+        }
     }
 
     if let refinePath {
@@ -319,7 +338,7 @@ if let diffusionPath {
     if let faceDetector {
         do {
             detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
-            detailEngine = try SDCppEngine(checkpoint: URL(fileURLWithPath: modelPath))
+            if faceEngine == "sdcpp" { detailEngine = try SDCppEngine(checkpoint: URL(fileURLWithPath: modelPath)) }
         } catch { fail("face repair setup: \(error.localizedDescription)") }
     }
 
@@ -342,6 +361,22 @@ if let diffusionPath {
                 if phase == .sample || phase == .hires, i > 0 { showProgress(phase.rawValue, i, n) }
             }
             FileHandle.standardError.write(Data("\n".utf8))
+            if detailEngine == nil, let detector {
+                // MLX face repair: sd.cpp only finds the faces, this engine repaints them
+                let tf = Date()
+                try Image(image).save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
+                let rgb = RGBImage(width: image.dim(1), height: image.dim(0), pixels: image.asData(access: .copy).data)
+                let faces = try detector.detect(rgb).map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
+                let td = Date().timeIntervalSince(tf)
+                var settings = FaceRepairSettings()
+                settings.strength = faceStrength
+                let fixed = try engine.repairFaces(rgb: rgb.pixels, width: rgb.width, height: rgb.height, faces: faces, p,
+                                                   settings: settings) { _, done, total in showProgress("face", done, total) }
+                FileHandle.standardError.write(Data("\n".utf8))
+                image = MLXArray(fixed, [rgb.height, rgb.width, 3], type: UInt8.self)
+                print(String(format: "face repair (MLX) %.2fs: %d face(s), detection %.2fs", Date().timeIntervalSince(tf),
+                             faces.count, td))
+            }
             if let detailEngine, let detector {
                 let tf = Date()
                 try Image(image).save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))

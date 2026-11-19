@@ -189,7 +189,7 @@ public final class WaiSDXL {
         return out
     }
 
-    private func encodeText(_ p: SDXLParameters) -> (MLXArray, MLXArray) {
+    func encodeText(_ p: SDXLParameters) -> (MLXArray, MLXArray) {
         let cond = encodeSDXL(p.prompt, tokenizer: tokenizer, clipL: clipL, clipG: clipG)
         let uncond = encodeSDXL(p.negativePrompt, tokenizer: tokenizer, clipL: clipL, clipG: clipG)
         let (ctxC, ctxU) = matchContextLength(cond.context, uncond.context)
@@ -225,6 +225,37 @@ public final class WaiSDXL {
         return latent
     }
 
+    /// Run the UNet through `MLX.compile` (fuses its many small element-wise kernels). The model is
+    /// passed as state, so LoRA weight changes are picked up; MLX recompiles when the image size changes.
+    /// Off: WAIGEN_COMPILE=0.
+    public var compileUNet = ProcessInfo.processInfo.environment["WAIGEN_COMPILE"] != "0"
+
+    private lazy var compiledUNet: @Sendable ([MLXArray]) -> [MLXArray] = {
+        let unet = self.unet
+        return compile(inputs: [unet], outputs: []) { a in
+            [unet(a[0], timestep: a[1], encoderX: a[2], textTime: (a[3], a[4]))]
+        }
+    }()
+
+    /// Seconds per sampling step per image (UNet with CFG, i.e. 2 passes per image) for `batch` images at
+    /// once, measured over `steps` steps after one warm-up step. For deciding on batching / compile.
+    public func benchmarkUNet(batch: Int, width: Int, height: Int, steps: Int = 6, compiled: Bool) -> Double {
+        let (h8, w8) = (height / 8, width / 8)
+        let x = MLXRandom.normal([2 * batch, h8, w8, 4]).asType(dtype)
+        let context = MLXRandom.normal([2 * batch, 77, 2048]).asType(dtype)
+        let pooled = MLXRandom.normal([2 * batch, 1280]).asType(dtype)
+        let ids = tiled(MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)]).reshaped(1, 6),
+                        repetitions: [2 * batch, 1]).asType(dtype)
+        let t = MLXArray(Array(repeating: Float(500), count: 2 * batch))
+        let step: () -> MLXArray = compiled
+            ? { self.compiledUNet([x, t, context, pooled, ids])[0] }
+            : { self.unet(x, timestep: t, encoderX: context, textTime: (pooled, ids)) }
+        eval(step())
+        let t0 = Date()
+        for _ in 0 ..< steps { eval(step()) }
+        return Date().timeIntervalSince(t0) / Double(steps * batch)
+    }
+
     /// CFG denoiser around the UNet (eps prediction -> denoised latent).
     func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int) -> Denoiser {
         let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
@@ -233,11 +264,14 @@ public final class WaiSDXL {
         let unet = self.unet
         let schedule = self.schedule
         let dtype = self.dtype
+        let compiled = compileUNet ? compiledUNet : nil
         return { x, sigma in
             let cIn = 1 / (sigma * sigma + 1).squareRoot()
             let t = schedule.timestep(sigma)
             let xIn = (concatenated([x, x], axis: 0) * cIn).asType(dtype)
-            let eps = unet(xIn, timestep: MLXArray([t, t]), encoderX: context, textTime: textTime)
+            let timesteps = MLXArray([t, t])
+            let eps = compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
+                ?? unet(xIn, timestep: timesteps, encoderX: context, textTime: textTime)
             let (epsC, epsU) = eps.split()
             let e = (epsU + cfg * (epsC - epsU)).asType(x.dtype)
             return x - sigma * e

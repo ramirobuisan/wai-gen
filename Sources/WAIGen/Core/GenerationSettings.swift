@@ -21,7 +21,7 @@ struct GenerationSettings: Codable, Equatable {
 
     var hiresEnabled = true
     var hiresScale = 1.5
-    var hiresSteps = 20
+    var hiresSteps = 15
     var hiresDenoise = 0.4
 
     /// ADetailer-style face repair after generation (YOLOv8 face detector + cropped repaint).
