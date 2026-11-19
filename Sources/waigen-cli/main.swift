@@ -41,6 +41,11 @@ func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
 /// MLX Anima model for stable-diffusion.cpp's diffusion forward passes
 extension Qwen3TextEncoder: SDCppExternalTextEncoder {}
 
+/// WAIGEN_HOOK_TIMING=1: time spent inside the MLX hooks (to see what stable-diffusion.cpp adds around them)
+nonisolated(unsafe) var hookSeconds = 0.0
+nonisolated(unsafe) var hookCalls = 0
+let hookTiming = ProcessInfo.processInfo.environment["WAIGEN_HOOK_TIMING"] != nil
+
 final class MLXDiTBridge: SDCppExternalDiffusion {
     let model: AnimaDiT
     init(_ model: AnimaDiT) { self.model = model }
@@ -55,6 +60,8 @@ final class MLXDiTBridge: SDCppExternalDiffusion {
             try? Data(bytes: context, count: n * 4).write(to: URL(fileURLWithPath: path))
             print("context \(contextShape) dumped to \(path)")
         }
+        let t = Date()
+        defer { if hookTiming { hookSeconds += Date().timeIntervalSince(t); hookCalls += 1 } }
         return model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
                   tokenIDs: tokenIDs, tokenWeights: tokenWeights, nTokens: nTokens, into: output)
     }
@@ -189,7 +196,16 @@ if let esrganTest {
     guard let upscalerPath = hiresUpscalerPath, let img = loadRGB(esrganTest) else { fail("--esrgan-test needs an image and --hires-upscaler") }
     do {
         let tl = Date()
-        let mlx = try RealESRGAN(url: URL(fileURLWithPath: upscalerPath))
+        guard let mlx = try? RealESRGAN(url: URL(fileURLWithPath: upscalerPath)) else {
+            // not an RRDBNet: only stable-diffusion.cpp can try it
+            print("not an ESRGAN (RRDBNet) model for MLX; trying stable-diffusion.cpp")
+            let ts = Date()
+            let ref = try SDCppUpscaler(model: URL(fileURLWithPath: upscalerPath)).upscale(img)
+            print(String(format: "sd.cpp: %dx%d -> %dx%d in %.2fs", img.width, img.height, ref.width, ref.height,
+                         Date().timeIntervalSince(ts)))
+            try Image(MLXArray(ref.pixels, [ref.height, ref.width, 3], type: UInt8.self)).save(url: outputURL(1))
+            finish(0)
+        }
         print(String(format: "MLX ESRGAN (%d blocks) loaded in %.2fs", mlx.blocks, Date().timeIntervalSince(tl)))
         let x = MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self)
         var a = MLXArray(0)
@@ -451,6 +467,12 @@ if let diffusionPath {
             }
             let array = MLXArray(final.pixels, [final.height, final.width, 3], type: UInt8.self)
             try Image(array).save(url: outputURL(run))
+            if hookTiming {
+                print(String(format: "MLX diffusion hook: %d calls, %.2fs (%.3f s/call)", hookCalls, hookSeconds,
+                             hookSeconds / Double(max(hookCalls, 1))))
+                hookSeconds = 0
+                hookCalls = 0
+            }
             print(String(format: "run %d seed %lld | %dx%d | total %.2fs%@ -> %@", run, p.seed, img.width,
                          img.height, Date().timeIntervalSince(ts), faceLine, outputURL(run).lastPathComponent))
         } catch { fail(error.localizedDescription) }

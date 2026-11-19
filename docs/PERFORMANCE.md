@@ -353,5 +353,13 @@ So the gain is ~0.25 s on the first image after the model loads and ~0.01 s per 
 ## Possible next steps
 
 - Every model now runs in MLX; stable-diffusion.cpp keeps WAI-ANIMA's tokenizers, sampler and masked img2img.
+  Measured what that costs (`WAIGEN_HOOK_TIMING=1` adds up the time inside the MLX diffusion hook): 1024×1344,
+  25 steps, sampling 31.97 s of which 31.87 s is the MLX model, so **0.10 s (0.3 %)** is stable-diffusion.cpp's
+  sampler, CFG and data copies. With every hook set it loads none of its own weights (its log lists 5.4 GB it would
+  load; a small job peaks at 7.2 GB, 5.6 GB of which are the MLX weights). Porting the rest (two tokenizers, the
+  flow sampler, masking, EasyCache) would save at most that 0.1 s; it would only be worth it to drop the C++
+  dependency altogether.
+- `4x-UltraSharpV2` (in the upscaler folder) is a DAT transformer, not ESRGAN: neither the MLX port nor
+  stable-diffusion.cpp can run it ("register upscaler weights failed").
 - What remains is mostly the models' own compute. Fewer model calls (Fast mode, Step cache, or both) is the
   remaining lever; they stack, but each changes the picture a little.
