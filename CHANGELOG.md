@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-20 (night)
+
+- stable-diffusion.cpp removed: WAI-ANIMA runs end to end in Swift + MLX (`WaiAnima`: Philox noise, flow
+  schedules, Euler / Euler a / DPM++ 2M, CFG, img2img, masked face repaint, EasyCache; `AnimaText`: prompt
+  weights, Qwen2 BPE and T5 unigram tokenizers). Ported line by line and checked against it: identical tokens,
+  a bit-identical 1-step image, the same pictures for the same seeds. No CMake step, no patch; the app is 22 MB
+  (was 61 MB).
+- WAI-ANIMA LoRAs: LoHa and LoKr are merged into the MLX model too (stable-diffusion.cpp crashed on LoKr).
+- Upscalers the app can't run (e.g. 4x-UltraSharpV2, a DAT model) are hidden from the picker; a saved choice
+  falls back to one that runs.
+- WaiAnima caps MLX's buffer cache at 2 GB: a hi-res job peaks at 16 GB instead of 34 GB, same speed.
+- CLI is MLX-only (`--detect`, `--img2img`, `--detail-only`, `--step-cache` for both models, `--make-test-lycoris`).
+
 ## 2026-11-20 (late)
 
 - The face detector (YOLOv8) runs in MLX for both models: same boxes, 0.011 s instead of 0.07-0.27 s. WAI-ANIMA's

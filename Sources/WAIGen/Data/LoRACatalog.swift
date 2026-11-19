@@ -12,8 +12,8 @@ struct LoRAFile: Identifiable, Hashable {
     func fits(_ engine: EngineKind) -> Bool? {
         guard let b = baseModel?.lowercased() else { return nil }
         switch engine {
-        case .mlx: return b.contains("sdxl") || b.contains("illustrious") || b.contains("noob") || b.contains("pony")
-        case .sdcpp: return b.contains("anima") || b.contains("cosmos")
+        case .sdxl: return b.contains("sdxl") || b.contains("illustrious") || b.contains("noob") || b.contains("pony")
+        case .anima: return b.contains("anima") || b.contains("cosmos")
         }
     }
 }

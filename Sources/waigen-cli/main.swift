@@ -1,24 +1,33 @@
-// waigen-cli — command-line front end for the WAI engines (testing and benchmarks).
+// waigen-cli — command-line front end for the WAI engines (testing and benchmarks). Everything runs in MLX.
 //
-// WAI Illustrious (MLX):
+// WAI-illustrious SDXL:
 //   waigen-cli --model <checkpoint.safetensors> --prompt "..." [options]
-// WAI-ANIMA (stable-diffusion.cpp):
+// WAI-ANIMA:
 //   waigen-cli --diffusion-model <anima.safetensors> --llm <qwen_3_06b_base.safetensors>
 //              --vae <qwen_image_vae.safetensors> --prompt "..." [options]
-// Options: [--negative "..."] [-W 832] [-H 1216] [--steps 28] [--cfg 6] [--sampler euler_ancestral]
-//          [--scheduler normal] [--seed 42] [--hires 1.5 --hires-steps 15 --hires-denoise 0.4]
-//          [--repeat N] [-o out.png]
+// Options: [--negative "..."] [-W 1024] [-H 1344] [--steps 28] [--cfg 6] [--sampler ...] [--scheduler ...]
+//          [--seed 42] [--hires 1.5 --hires-steps 15 --hires-denoise 0.4 --hires-upscaler <esrgan>]
+//          [--face-repair <face_yolov8m.safetensors> --face-strength 0.4] [--step-cache 0.5]
+//          [--lora path[:strength]]... [--repeat N] [-o out.png]
+// Samplers: SDXL euler_ancestral | euler | dpmpp_2m (schedulers normal | karras | simple);
+//           WAI-ANIMA euler_a | euler | dpm++2m (schedulers discrete | karras | simple).
 
 import CoreGraphics
 import Foundation
 import ImageIO
 import MLX
+import MLXRandom
 import WaiMLX
-import WaiSDCpp
 
 func fail(_ msg: String) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
     finish(1)
+}
+
+func finish(_ code: Int32) -> Never {
+    fflush(stdout)
+    fflush(stderr)
+    exit(code)
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -29,63 +38,16 @@ func take(_ names: String...) -> String? {
     return v
 }
 
-/// Upscaler model: MLX for ESRGAN (RRDBNet) files, stable-diffusion.cpp otherwise (same as the app).
+/// ESRGAN (RRDBNet) upscaler model in MLX, x4.
 func upscaleImage(_ img: RGBImage, model path: String) throws -> RGBImage {
-    if let esrgan = try? RealESRGAN(url: URL(fileURLWithPath: path)) {
-        let out = esrgan.upscale(MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self))
-        return RGBImage(width: out.dim(1), height: out.dim(0), pixels: out.asData(access: .copy).data)
-    }
-    return try SDCppUpscaler(model: URL(fileURLWithPath: path)).upscale(img)
-}
-
-/// MLX Anima model for stable-diffusion.cpp's diffusion forward passes
-extension Qwen3TextEncoder: SDCppExternalTextEncoder {}
-
-/// WAIGEN_HOOK_TIMING=1: time spent inside the MLX hooks (to see what stable-diffusion.cpp adds around them)
-nonisolated(unsafe) var hookSeconds = 0.0
-nonisolated(unsafe) var hookCalls = 0
-let hookTiming = ProcessInfo.processInfo.environment["WAIGEN_HOOK_TIMING"] != nil
-
-final class MLXDiTBridge: SDCppExternalDiffusion {
-    let model: AnimaDiT
-    init(_ model: AnimaDiT) { self.model = model }
-    private var dumped = false
-    func forward(x: UnsafePointer<Float>, shape: [Int], timesteps: UnsafePointer<Float>, nTimesteps: Int,
-                 context: UnsafePointer<Float>, contextShape: [Int], tokenIDs: UnsafePointer<Int32>?,
-                 tokenWeights: UnsafePointer<Float>?, nTokens: Int, into output: UnsafeMutablePointer<Float>) -> Bool {
-        // WAIGEN_DUMP_CONTEXT=file: save the first text-encoder states the model receives (to compare encoders)
-        if !dumped, let path = ProcessInfo.processInfo.environment["WAIGEN_DUMP_CONTEXT"] {
-            dumped = true
-            let n = contextShape.reduce(1, *)
-            try? Data(bytes: context, count: n * 4).write(to: URL(fileURLWithPath: path))
-            print("context \(contextShape) dumped to \(path)")
-        }
-        let t = Date()
-        defer { if hookTiming { hookSeconds += Date().timeIntervalSince(t); hookCalls += 1 } }
-        return model.run(x: x, shape: shape, timesteps: timesteps, nTimesteps: nTimesteps, context: context, contextShape: contextShape,
-                  tokenIDs: tokenIDs, tokenWeights: tokenWeights, nTokens: nTokens, into: output)
-    }
-}
-
-/// MLX VAE for stable-diffusion.cpp's single-image encode/decode
-final class MLXVAEBridge: SDCppExternalVAE {
-    let vae: QwenImageVAE
-    init(_ vae: QwenImageVAE) { self.vae = vae }
-    func encode(_ input: UnsafePointer<Float>, shape: [Int], into output: UnsafeMutablePointer<Float>, outputShape: [Int]) -> Bool {
-        guard outputShape[1] == vae.latentChannels else { return false }
-        return vae.encode(nchw: input, n: shape[0], channels: shape[1], height: shape[2], width: shape[3], into: output)
-    }
-    func decode(_ input: UnsafePointer<Float>, shape: [Int], into output: UnsafeMutablePointer<Float>, outputShape: [Int]) -> Bool {
-        guard outputShape[1] == 3 else { return false }
-        return vae.decode(nchw: input, n: shape[0], channels: shape[1], height: shape[2], width: shape[3], into: output)
-    }
+    RGBImage(try RealESRGAN(url: URL(fileURLWithPath: path)).upscale(img.array))
 }
 
 let modelPath = take("--model", "-m")
 let diffusionPath = take("--diffusion-model")
 let llmPath = take("--llm")
 let vaePath = take("--vae")
-guard let prompt = take("--prompt", "-p") else { fail("--prompt is required") }
+let prompt = take("--prompt", "-p") ?? ""
 let negative = take("--negative", "-n") ?? ""
 let width = take("-W", "--width").flatMap(Int.init)
 let height = take("-H", "--height").flatMap(Int.init)
@@ -97,60 +59,33 @@ let seed = take("--seed").flatMap(UInt64.init) ?? UInt64.random(in: 0 ... 0xFFFF
 let hires = take("--hires").flatMap(Float.init)
 let hiresSteps = take("--hires-steps").flatMap(Int.init)
 let hiresDenoise = take("--hires-denoise").flatMap(Float.init)
+let hiresUpscalerPath = take("--hires-upscaler")   // ESRGAN model, e.g. RealESRGAN_x4plus_anime_6B.pth
 var loraArgs = [String]()
 while let l = take("--lora") { loraArgs.append(l) }   // path[:strength], repeatable
-let loraSelfTest = take("--lora-selftest")
-let benchUNet = take("--bench-unet")   // WxH, e.g. 1024x1344: UNet s/step per image, batch 1 vs 2, compile off/on
 let loras: [LoRASpec] = loraArgs.map { a in
     let parts = a.split(separator: ":")
     let strength = parts.count > 1 ? Float(parts.last!) ?? 1 : 1
     let path = parts.count > 1 && Float(parts.last!) != nil ? parts.dropLast().joined(separator: ":") : a
     return LoRASpec(url: URL(fileURLWithPath: path), strength: strength)
 }
-let hiresUpscalerPath = take("--hires-upscaler")   // ESRGAN model, e.g. RealESRGAN_x4plus_anime_6B.pth
-let previewDir = take("--preview-dir")   // save every step's live preview here (to measure its cost)
-let refinePath = take("--refine")        // upscale + detail pass on an existing image (gallery Upscale)
+let loraSelfTest = take("--lora-selftest")         // SDXL: generate with / without a LoRA and compare
+let stepCacheThreshold = take("--step-cache").flatMap(Float.init)   // EasyCache threshold (0.5 in the app)
+let previewDir = take("--preview-dir")            // save every step's live preview here
+let refinePath = take("--refine")                 // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
-let vaeEngine = take("--vae-engine") ?? "mlx"      // WAI-ANIMA VAE: mlx (default) or sdcpp
-let weightType = take("--wtype")                  // WAI-ANIMA: convert weights at load (e.g. q8_0)
-let benchTE = take("--bench-te")                   // "prompt|prompt|...": WAI-ANIMA text encoding time per new prompt
-let teEngine = take("--te-engine") ?? "mlx"        // WAI-ANIMA text encoder (Qwen3 forward): mlx (default) or sdcpp
-let ditEngine = take("--dit-engine") ?? "mlx"      // WAI-ANIMA diffusion model: mlx (default) or sdcpp
-let benchAnima = take("--bench-anima")             // WxH: MLX Anima forward time, compile off/on, adapter share
-let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16   // MLX Anima weights: bf16 (default) or f16
-let vaeRoundtrip = take("--vae-roundtrip")         // encode + decode an image with the MLX VAE and exit
-let stepCache = take("--cache").map { a -> SDCppStepCache in    // WAI-ANIMA: sd.cpp step cache, mode[:k=v,...]
-    guard let c = SDCppStepCache(argument: a) else { fail("--cache: use mode or mode:key=value,key=value") }
-    return c
-}
-let esrganTest = take("--esrgan-test")             // upscale an image with --hires-upscaler in MLX and sd.cpp, compare
-
-/// Read an image file as RGB8 (exact size).
-func loadRGB(_ path: String) -> RGBImage? {
-    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-        let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-    let w = cg.width, h = cg.height
-    var rgba = Data(count: w * h * 4)
-    rgba.withUnsafeMutableBytes { buf in
-        let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
-        ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-    }
-    var rgb = Data(count: w * h * 3)
-    for i in 0 ..< w * h { rgb[i * 3] = rgba[i * 4]; rgb[i * 3 + 1] = rgba[i * 4 + 1]; rgb[i * 3 + 2] = rgba[i * 4 + 2] }
-    return RGBImage(width: w, height: h, pixels: rgb)
-}
-let faceDetector = take("--face-repair")   // path to face_yolov8m.safetensors
-let faceEngine = take("--face-engine") ?? "mlx"   // face repainting for SDXL: mlx (default) or sdcpp
+let img2imgPath = take("--img2img")               // WAI-ANIMA: img2img from this image at --hires-denoise
+let detailOnly = take("--detail-only")            // WAI-ANIMA: only the face repair, on this image
+let faceDetector = take("--face-repair")          // path to face_yolov8m.safetensors
 let faceStrength = take("--face-strength").flatMap(Float.init) ?? 0.4
-let sdxlStepCache = take("--step-cache").flatMap(Float.init)   // WAI Illustrious: MLX step cache threshold
-let detectTest = take("--detect-test")   // comma-separated images: MLX vs stable-diffusion.cpp face detector
-let detectEngine = take("--detect-engine") ?? "mlx"   // face detector (and WAI-ANIMA face repaint driver): mlx or sdcpp
-let detailOnly = take("--detail-only")   // WAI-ANIMA: run only the face repair on this image
-let faceSize = take("--face-size").flatMap(Int.init)     // WAI-ANIMA face repair: repaint size (default 1024)
-let faceSteps = take("--face-steps").flatMap(Int.init)   // WAI-ANIMA face repair: schedule length (default --steps)
-let faceCache = take("--face-cache").flatMap(SDCppStepCache.init(argument:))   // step cache for the face repaint
+let faceSize = take("--face-size").flatMap(Int.init)     // WAI-ANIMA face repaint size (default: the app's 768/1024 rule)
+let faceSteps = take("--face-steps").flatMap(Int.init)   // WAI-ANIMA face repair schedule length (default --steps)
+let detectPath = take("--detect")                 // print the faces found in these images (comma-separated) and the time
+let benchUNet = take("--bench-unet")              // WxH: SDXL UNet s/step, batch 1 vs 2, compile off/on
+let benchAnima = take("--bench-anima")            // WxH: Anima forward time per pass
+let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16
+let vaeRoundtrip = take("--vae-roundtrip")        // WAI-ANIMA: encode + decode an image with the VAE
+let esrganTest = take("--esrgan-test")            // upscale an image with --hires-upscaler and time it
+let makeLycoris = take("--make-test-lycoris")     // dir: synthetic LoHa / LoKr / LoRA files for WAI-ANIMA
 let repeats = take("--repeat").flatMap(Int.init) ?? 1
 let output = take("--output", "-o") ?? "waigen.png"
 if !args.isEmpty { fail("unknown arguments: \(args)") }
@@ -164,145 +99,117 @@ func showProgress(_ label: String, _ i: Int, _ n: Int) {
     FileHandle.standardError.write(Data("\r\(label) \(i)/\(n)   ".utf8))
 }
 
-if let detectTest {
-    guard let faceDetector else { fail("--detect-test needs --face-repair <detector.safetensors>") }
+func previewSink() -> ((MLXArray) -> Void)? {
+    var count = 0
+    return previewDir.map { dir in
+        { arr in
+            count += 1
+            if dir == "-" { _ = arr.asData(access: .copy).data } else {   // "-": only copy the pixels out, like the app
+                try? Image(arr).save(url: URL(fileURLWithPath: dir).appendingPathComponent(String(format: "step_%02d.png", count)))
+            }
+        }
+    }
+}
+
+if let makeLycoris {
+    // 12 blocks x 3 attention projections, small random factors (deterministic seed)
+    MLXRandom.seed(7)
+    var loha: [String: MLXArray] = [:], lokr: [String: MLXArray] = [:], lohaOnes: [String: MLXArray] = [:], loraEq: [String: MLXArray] = [:]
+    var lokrFull: [String: MLXArray] = [:], loraKron: [String: MLXArray] = [:]
+    for b in 0 ..< 12 {
+        for proj in ["q_proj", "k_proj", "v_proj"] {
+            let m = "diffusion_model.blocks.\(b).self_attn.\(proj)"
+            let r = 8
+            loha[m + ".hada_w1_a"] = MLXRandom.normal([2048, r]) * 0.05
+            loha[m + ".hada_w1_b"] = MLXRandom.normal([r, 2048]) * 0.05
+            loha[m + ".hada_w2_a"] = MLXRandom.normal([2048, r]) * 0.05
+            loha[m + ".hada_w2_b"] = MLXRandom.normal([r, 2048]) * 0.05
+            loha[m + ".alpha"] = MLXArray(Float(4))
+            lokr[m + ".lokr_w1"] = MLXRandom.normal([8, 8]) * 0.05
+            lokr[m + ".lokr_w2_a"] = MLXRandom.normal([256, r]) * 0.05
+            lokr[m + ".lokr_w2_b"] = MLXRandom.normal([r, 256]) * 0.05
+            lokr[m + ".alpha"] = MLXArray(Float(4))
+            // LoHa whose second factor is all ones == LoRA(up: w1a, down: w1b); same alpha and rank -> same delta
+            let a = MLXRandom.normal([2048, r]) * 0.2, bb = MLXRandom.normal([r, 2048]) * 0.2
+            lohaOnes[m + ".hada_w1_a"] = a; lohaOnes[m + ".hada_w1_b"] = bb
+            lohaOnes[m + ".hada_w2_a"] = MLXArray.ones([2048, 1]); lohaOnes[m + ".hada_w2_b"] = MLXArray.ones([1, 2048])
+            lohaOnes[m + ".alpha"] = MLXArray(Float(4))
+            loraEq[m + ".lora_up.weight"] = a; loraEq[m + ".lora_down.weight"] = bb; loraEq[m + ".alpha"] = MLXArray(Float(4))
+            // LoKr with w1 = [[1]] (1x1) and full w2 == the full delta w2 (scale 1): same as LoRA(up, down) at alpha = rank
+            let u = MLXRandom.normal([2048, r]) * 0.2, dn = MLXRandom.normal([r, 2048]) * 0.2
+            lokrFull[m + ".lokr_w1"] = MLXArray.ones([1, 1]); lokrFull[m + ".lokr_w2"] = matmul(u, dn)
+            loraKron[m + ".lora_up.weight"] = u; loraKron[m + ".lora_down.weight"] = dn
+        }
+    }
     do {
-        let tl = Date()
-        let mlx = try YOLOFaceDetector(url: URL(fileURLWithPath: faceDetector))
-        print(String(format: "MLX detector loaded in %.2fs", Date().timeIntervalSince(tl)))
-        let sd = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
-        for path in detectTest.split(separator: ",").map(String.init) {
-            guard let img = loadRGB(path) else { fail("couldn't read \(path)") }
-            _ = mlx.detect(rgb: img.pixels, width: img.width, height: img.height)   // warm-up
-            _ = try sd.detect(img)
-            var tm = Date()
-            var a: [FaceBox] = []
-            for _ in 0 ..< 5 { a = mlx.detect(rgb: img.pixels, width: img.width, height: img.height) }
-            let mlxTime = Date().timeIntervalSince(tm) / 5
-            tm = Date()
-            var b: [(x1: Float, y1: Float, x2: Float, y2: Float, confidence: Float)] = []
-            for _ in 0 ..< 5 { b = try sd.detect(img) }
-            let sdTime = Date().timeIntervalSince(tm) / 5
-            print(String(format: "%@ %dx%d: MLX %.3fs, sd.cpp %.3fs", (path as NSString).lastPathComponent, img.width,
-                         img.height, mlxTime, sdTime))
-            for f in a { print(String(format: "  mlx    [%.1f %.1f %.1f %.1f] %.3f", f.x1, f.y1, f.x2, f.y2, f.confidence)) }
-            for f in b { print(String(format: "  sd.cpp [%.1f %.1f %.1f %.1f] %.3f", f.x1, f.y1, f.x2, f.y2, f.confidence)) }
+        try save(arrays: loha, url: URL(fileURLWithPath: makeLycoris).appendingPathComponent("test_loha.safetensors"))
+        try save(arrays: lokr, url: URL(fileURLWithPath: makeLycoris).appendingPathComponent("test_lokr.safetensors"))
+        for (name, a) in [("test_loha_ones", lohaOnes), ("test_lora_eq", loraEq), ("test_lokr_full", lokrFull), ("test_lora_kron", loraKron)] {
+            try save(arrays: a, url: URL(fileURLWithPath: makeLycoris).appendingPathComponent(name + ".safetensors"))
+        }
+        print("wrote test_loha / test_lokr (36 modules each)")
+    } catch { fail(error.localizedDescription) }
+    finish(0)
+}
+
+if let detectPath {
+    guard let faceDetector else { fail("--detect needs --face-repair <detector.safetensors>") }
+    do {
+        let det = try YOLOFaceDetector(url: URL(fileURLWithPath: faceDetector))
+        for path in detectPath.split(separator: ",").map(String.init) {
+            guard let img = RGBImage.load(URL(fileURLWithPath: path)) else { fail("couldn't read \(path)") }
+            _ = det.detect(rgb: img.pixels, width: img.width, height: img.height)   // warm-up
+            let t = Date()
+            let faces = det.detect(rgb: img.pixels, width: img.width, height: img.height)
+            print(String(format: "%@ %dx%d: %d face(s) in %.3fs", (path as NSString).lastPathComponent, img.width, img.height,
+                         faces.count, Date().timeIntervalSince(t)))
+            for f in faces { print(String(format: "  [%.1f %.1f %.1f %.1f] %.3f", f.x1, f.y1, f.x2, f.y2, f.confidence)) }
         }
     } catch { fail(error.localizedDescription) }
     finish(0)
 }
 
 if let esrganTest {
-    guard let upscalerPath = hiresUpscalerPath, let img = loadRGB(esrganTest) else { fail("--esrgan-test needs an image and --hires-upscaler") }
+    guard let upscalerPath = hiresUpscalerPath, let img = RGBImage.load(URL(fileURLWithPath: esrganTest)) else {
+        fail("--esrgan-test needs an image and --hires-upscaler")
+    }
     do {
         let tl = Date()
-        guard let mlx = try? RealESRGAN(url: URL(fileURLWithPath: upscalerPath)) else {
-            // not an RRDBNet: only stable-diffusion.cpp can try it
-            print("not an ESRGAN (RRDBNet) model for MLX; trying stable-diffusion.cpp")
-            let ts = Date()
-            let ref = try SDCppUpscaler(model: URL(fileURLWithPath: upscalerPath)).upscale(img)
-            print(String(format: "sd.cpp: %dx%d -> %dx%d in %.2fs", img.width, img.height, ref.width, ref.height,
-                         Date().timeIntervalSince(ts)))
-            try Image(MLXArray(ref.pixels, [ref.height, ref.width, 3], type: UInt8.self)).save(url: outputURL(1))
-            finish(0)
-        }
-        print(String(format: "MLX ESRGAN (%d blocks) loaded in %.2fs", mlx.blocks, Date().timeIntervalSince(tl)))
-        let x = MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self)
-        var a = MLXArray(0)
+        let model = try RealESRGAN(url: URL(fileURLWithPath: upscalerPath))
+        print(String(format: "ESRGAN (%d blocks) loaded in %.2fs", model.blocks, Date().timeIntervalSince(tl)))
+        var out = MLXArray(0)
         for run in 1 ... 2 {
             let t = Date()
-            a = mlx.upscale(x)
-            print(String(format: "MLX run %d: %dx%d -> %dx%d in %.2fs", run, img.width, img.height, a.dim(1), a.dim(0),
+            out = model.upscale(img.array)
+            print(String(format: "run %d: %dx%d -> %dx%d in %.2fs", run, img.width, img.height, out.dim(1), out.dim(0),
                          Date().timeIntervalSince(t)))
         }
-        try Image(a).save(url: outputURL(1))
-        let ts = Date()
-        let ref = try SDCppUpscaler(model: URL(fileURLWithPath: upscalerPath)).upscale(img)
-        print(String(format: "sd.cpp: %.2fs", Date().timeIntervalSince(ts)))
-        let b = MLXArray(ref.pixels, [ref.height, ref.width, 3], type: UInt8.self)
-        let mse = (a.asType(.float32) - b.asType(.float32)).square().mean().item(Float.self)
-        print(String(format: "PSNR MLX vs sd.cpp: %.2f dB", 10 * log10(255 * 255 / mse)))
+        try Image(out).save(url: outputURL(1))
     } catch { fail(error.localizedDescription) }
     finish(0)
 }
 
-/// WAI-ANIMA face repair. `--detect-engine mlx` (default, as the app): MLX detector + the ADetailer geometry in
-/// Swift, each crop repainted by stable-diffusion.cpp's masked img2img. `sdcpp`: stable-diffusion.cpp's ADetailer.
-/// `dp.inpaintSize` 0 = the app's rule (768 px unless a face crop is larger).
-func animaFaceRepair(_ engine: SDCppEngine, _ img: RGBImage, _ dp: SDCppDetailParameters, detectorPath: String) throws -> RGBImage {
-    if detectEngine == "sdcpp" {
-        var d = dp
-        if d.inpaintSize == 0 { d.inpaintSize = 1024 }
-        let detector = try SDCppFaceDetector(model: URL(fileURLWithPath: detectorPath))
-        return try engine.detail(img, detector: detector, d) { _, done, total in
-            if total > 0 { showProgress("face", Int(done), Int(total)) }
-        }
-    }
-    let t0 = Date()
-    let detector = try YOLOFaceDetector(url: URL(fileURLWithPath: detectorPath))
-    _ = detector.detect(rgb: img.pixels, width: img.width, height: img.height)   // warm-up, as the app's cached detector
-    let t1 = Date()
-    let faces = detector.detect(rgb: img.pixels, width: img.width, height: img.height, confidence: dp.confidence)
-    let t2 = Date()
-    var repaintTime = 0.0
-    var settings = FaceRepairSettings()
-    settings.strength = dp.strength
-    settings.padding = dp.padding
-    settings.maskBlur = dp.maskBlur
-    let size = dp.inpaintSize > 0 ? dp.inpaintSize : (FaceRepairGeometry.largestCrop(faces, settings: settings) > 768 ? 1024 : 768)
-    settings.inpaintSize = size
-    let fixed = try FaceRepairGeometry.apply(rgb: img.pixels, width: img.width, height: img.height, faces: faces,
-                                             settings: settings) { crop, mask, i in
-        var p = SDCppParameters(prompt: dp.prompt)
-        p.loras = dp.loras
-        p.negativePrompt = dp.negativePrompt
-        p.steps = dp.steps
-        p.cfg = dp.cfg
-        p.sampler = dp.sampler
-        p.scheduler = dp.scheduler
-        p.seed = dp.seed &+ Int64(i)
-        p.stepCache = dp.stepCache
-        p.width = size
-        p.height = size
-        p.initImage = RGBImage(width: size, height: size, pixels: Data(crop))
-        p.maskImage = Data(mask.map { $0 > 0 ? 255 : 0 })
-        p.strength = dp.strength
-        let tr = Date()
-        let out = try engine.generate(p) { _, done, total in if total > 0 { showProgress("face", Int(done), Int(total)) } }
-        repaintTime += Date().timeIntervalSince(tr)
-        return [UInt8](out.pixels)
-    }
-    let geometry = Date().timeIntervalSince(t2) - repaintTime
-    FileHandle.standardError.write(Data(String(format: "\n[mlx face] load+warm-up %.3fs, detect %.3fs, crop/blend %.3fs, repaint %.2fs\n",
-                                               t1.timeIntervalSince(t0), t2.timeIntervalSince(t1), geometry, repaintTime).utf8))
-    return RGBImage(width: img.width, height: img.height, pixels: fixed)
-}
-
 if let diffusionPath {
-    // ---------------- WAI-ANIMA through stable-diffusion.cpp
-    guard let llmPath, let vaePath else { fail("--llm and --vae are required with --diffusion-model") }
+    // ---------------- WAI-ANIMA
+    guard let llmPath, let vaePath else { fail("WAI-ANIMA needs --diffusion-model, --llm and --vae") }
     if let benchAnima {
         let wh = benchAnima.split(separator: "x").compactMap { Int($0) }
         guard wh.count == 2 else { fail("--bench-anima WxH") }
         do {
             let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType)
-            for (b, c) in [(1, false), (2, false), (1, false), (2, false)] {
-                let r = dit.benchmark(width: wh[0], height: wh[1], batch: b, compiled: c)
-                print(String(format: "%dx%d batch %d compile %@: %.3f s per forward per sample (adapter %.4f s)", wh[0], wh[1], b,
-                             c ? "on " : "off", r.forward, r.adapter))
+            for _ in 0 ..< 2 {
+                let r = dit.benchmark(width: wh[0], height: wh[1], batch: 1, compiled: false)
+                print(String(format: "%dx%d: %.3f s per forward (adapter %.4f s)", wh[0], wh[1], r.forward, r.adapter))
             }
         } catch { fail(error.localizedDescription) }
         finish(0)
     }
     if let vaeRoundtrip {
-        guard let img = loadRGB(vaeRoundtrip) else { fail("couldn't read \(vaeRoundtrip)") }
+        guard let img = RGBImage.load(URL(fileURLWithPath: vaeRoundtrip)) else { fail("couldn't read \(vaeRoundtrip)") }
         do {
-            let tl = Date()
             let vae = try QwenImageVAE(url: URL(fileURLWithPath: vaePath))
-            print(String(format: "MLX VAE loaded in %.2fs", Date().timeIntervalSince(tl)))
             let (w, h) = (img.width / 8 * 8, img.height / 8 * 8)
-            let src = img.resized(width: w, height: h)
-            let x = MLXArray(src.pixels, [1, h, w, 3], type: UInt8.self).asType(.float32) / 127.5 - 1
+            let x = img.resized(width: w, height: h).array[.newAxis].asType(.float32) / 127.5 - 1
             for run in 1 ... 2 {
                 let te = Date()
                 let z = vae.encode(x)
@@ -311,172 +218,110 @@ if let diffusionPath {
                 let y = vae.decode(z)
                 eval(y)
                 let mse = ((y.asType(.float32) - x) * 0.5).square().mean().item(Float.self)
-                print(String(format: "run %d %dx%d: encode %.2fs, decode %.2fs, latent std %.3f, PSNR %.2f dB", run, w, h,
-                             td.timeIntervalSince(te), Date().timeIntervalSince(td),
-                             z.asType(.float32).variance().sqrt().item(Float.self), 10 * log10(1 / mse)))
+                print(String(format: "run %d %dx%d: encode %.2fs, decode %.2fs, PSNR %.2f dB", run, w, h,
+                             td.timeIntervalSince(te), Date().timeIntervalSince(td), 10 * log10(1 / mse)))
                 if run == 2 {
-                    let out = clip(((y.asType(.float32) + 1) * 127.5).round(), min: 0, max: 255).asType(.uint8)[0]
-                    try Image(out).save(url: outputURL(1))
+                    try Image(clip(((y.asType(.float32) + 1) * 127.5).round(), min: 0, max: 255).asType(.uint8)[0]).save(url: outputURL(1))
                 }
             }
         } catch { fail(error.localizedDescription) }
         finish(0)
     }
-    let t0 = Date()
-    let engine: SDCppEngine
     do {
-        engine = try SDCppEngine(
-            diffusionModel: URL(fileURLWithPath: diffusionPath), llm: URL(fileURLWithPath: llmPath),
-            vae: URL(fileURLWithPath: vaePath), weightType: weightType)
-        if vaeEngine == "mlx" { engine.externalVAE = MLXVAEBridge(try QwenImageVAE(url: URL(fileURLWithPath: vaePath))) }
-        if teEngine == "mlx" {
-            let tt = Date()
-            engine.externalTextEncoder = try Qwen3TextEncoder(url: URL(fileURLWithPath: llmPath))
-            print(String(format: "MLX Qwen3 text encoder loaded in %.2fs (hook %@)", Date().timeIntervalSince(tt),
-                         engine.externalTextEncoderActive ? "active" : "NOT active"))
+        let tl = Date()
+        let anima = try WaiAnima(dit: AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType),
+                                 textEncoder: Qwen3TextEncoder(url: URL(fileURLWithPath: llmPath)),
+                                 vae: QwenImageVAE(url: URL(fileURLWithPath: vaePath)))
+        if !loras.isEmpty {
+            let r = try anima.dit.setLoRAs(loras)
+            print("LoRA: \(r.applied) layers, \(r.unmatched.count) unmatched")
         }
-        if ditEngine == "mlx" {
-            let td = Date()
-            let dit = try AnimaDiT(url: URL(fileURLWithPath: diffusionPath), dtype: animaDType)
-            if !loras.isEmpty {
-                let r = try dit.setLoRAs(loras)
-                print("MLX Anima LoRA: \(r.applied) layers, \(r.unmatched.count) unmatched")
+        print(String(format: "WAI-ANIMA loaded in %.2fs", Date().timeIntervalSince(tl)))
+        let detector = try faceDetector.map { try YOLOFaceDetector(url: URL(fileURLWithPath: $0)) }
+
+        for run in 1 ... repeats {
+            var p = AnimaParameters(prompt: prompt)
+            p.negativePrompt = negative
+            if let width { p.width = width }
+            if let height { p.height = height }
+            if let steps { p.steps = steps }
+            if let cfg { p.cfg = cfg }
+            if let samplerName {
+                guard let s = AnimaSampler(rawValue: samplerName) else { fail("WAI-ANIMA sampler: euler_a, euler or dpm++2m") }
+                p.sampler = s
             }
-            engine.externalDiffusion = MLXDiTBridge(dit)
-            print(String(format: "MLX Anima model loaded in %.1fs (hook %@)", Date().timeIntervalSince(td),
-                         engine.externalDiffusionActive ? "active" : "NOT active"))
+            if let schedulerName {
+                guard let s = AnimaScheduler(rawValue: schedulerName) else { fail("WAI-ANIMA scheduler: discrete, karras or simple") }
+                p.scheduler = s
+            }
+            p.seed = Int64(truncatingIfNeeded: seed &+ UInt64(run - 1))
+            p.stepCache = stepCacheThreshold
+            let ts = Date()
+            var line = ""
+
+            /// img2img at `w` x `h`: `n` steps of an n/denoise schedule (the app's hi-res fix and gallery Upscale)
+            func refine(_ src: RGBImage, _ w: Int, _ h: Int, _ n: Int, _ denoise: Float) throws -> RGBImage {
+                var q = p
+                q.width = w / 16 * 16
+                q.height = h / 16 * 16
+                q.initImage = src.resized(width: q.width, height: q.height).pixels
+                q.strength = denoise
+                q.steps = Int((Float(n) / max(denoise, 0.05)).rounded(.up))
+                let out = try anima.generate(q, preview: previewSink()) { i, k in showProgress("hires", i, k) }
+                FileHandle.standardError.write(Data("\n".utf8))
+                return RGBImage(out)
+            }
+
+            var img: RGBImage
+            if let detailOnly {
+                guard let src = RGBImage.load(URL(fileURLWithPath: detailOnly)) else { fail("couldn't read \(detailOnly)") }
+                img = src
+            } else if let refinePath {
+                guard let src = RGBImage.load(URL(fileURLWithPath: refinePath)) else { fail("couldn't read \(refinePath)") }
+                let up = try hiresUpscalerPath.map { try upscaleImage(src, model: $0) } ?? src
+                img = try refine(up, Int(Double(src.width) * refineScale), Int(Double(src.height) * refineScale),
+                                 hiresSteps ?? 15, hiresDenoise ?? 0.4)
+            } else if let img2imgPath {
+                guard let src = RGBImage.load(URL(fileURLWithPath: img2imgPath)) else { fail("couldn't read \(img2imgPath)") }
+                p.width = src.width / 16 * 16
+                p.height = src.height / 16 * 16
+                p.initImage = src.resized(width: p.width, height: p.height).pixels
+                p.strength = hiresDenoise ?? 0.4
+                img = RGBImage(try anima.generate(p, preview: previewSink()) { i, n in showProgress("img2img", i, n) })
+                FileHandle.standardError.write(Data("\n".utf8))
+            } else {
+                img = RGBImage(try anima.generate(p, preview: previewSink()) { i, n in showProgress("sampling", i, n) })
+                FileHandle.standardError.write(Data("\n".utf8))
+                line += String(format: " | base %.2fs", Date().timeIntervalSince(ts))
+                if anima.lastSkippedSteps > 0 { line += " (cache skipped \(anima.lastSkippedSteps))" }
+                if let hires, hires > 1 {
+                    let th = Date()
+                    let up = try hiresUpscalerPath.map { try upscaleImage(img, model: $0) } ?? img
+                    img = try refine(up, Int(Float(p.width) * hires), Int(Float(p.height) * hires), hiresSteps ?? 15,
+                                     hiresDenoise ?? 0.4)
+                    line += String(format: " | hires %.2fs", Date().timeIntervalSince(th))
+                }
+            }
+            if let detector {
+                let tf = Date()
+                let faces = detector.detect(rgb: img.pixels, width: img.width, height: img.height)
+                var settings = FaceRepairSettings()
+                settings.strength = faceStrength
+                settings.inpaintSize = faceSize ?? WaiAnima.faceRepaintSize(faces, settings: settings)
+                var fp = p
+                if let faceSteps { fp.steps = faceSteps }
+                let fixed = try anima.repairFaces(rgb: img.pixels, width: img.width, height: img.height, faces: faces, fp,
+                                                  settings: settings) { _, i, n in showProgress("face", i, n) }
+                FileHandle.standardError.write(Data("\n".utf8))
+                img = RGBImage(width: img.width, height: img.height, pixels: fixed)
+                line += String(format: " | face repair %.2fs (%d face(s), %d px)", Date().timeIntervalSince(tf), faces.count,
+                               settings.inpaintSize)
+            }
+            try Image(img.array).save(url: outputURL(run))
+            print(String(format: "run %d seed %lld | %dx%d%@ | total %.2fs -> %@", run, p.seed, img.width, img.height, line,
+                         Date().timeIntervalSince(ts), outputURL(run).lastPathComponent))
         }
     } catch { fail(error.localizedDescription) }
-    print(String(format: "loaded %@ in %.1fs", (diffusionPath as NSString).lastPathComponent, Date().timeIntervalSince(t0)))
-
-    if let refinePath {
-        // like the app's gallery Upscale for sd.cpp models: upscale, then img2img at the new size
-        guard var img = loadRGB(refinePath) else { fail("couldn't read \(refinePath)") }
-        let ts = Date()
-        do {
-            let tw = Int(Double(img.width) * refineScale) / 16 * 16
-            let th = Int(Double(img.height) * refineScale) / 16 * 16
-            if let hiresUpscalerPath { img = try upscaleImage(img, model: hiresUpscalerPath) }
-            img = img.resized(width: tw, height: th)
-            var p = SDCppParameters(prompt: prompt)
-            p.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }   // its own model + text encoder
-            p.negativePrompt = negative
-            p.width = tw
-            p.height = th
-            p.cfg = cfg ?? 4.5
-            p.sampler = samplerName ?? "euler_a"
-            p.seed = Int64(truncatingIfNeeded: seed)
-            p.initImage = img
-            p.stepCache = stepCache
-            p.strength = hiresDenoise ?? 0.4
-            p.steps = Int((Double(hiresSteps ?? 20) / Double(p.strength)).rounded(.up))
-            let out = try engine.generate(p) { stage, done, total in if total > 0 { showProgress(stage, Int(done), Int(total)) } }
-            FileHandle.standardError.write(Data("\n".utf8))
-            try Image(MLXArray(out.pixels, [out.height, out.width, 3], type: UInt8.self)).save(url: outputURL(1))
-            print(String(format: "refine -> %dx%d in %.2fs -> %@", out.width, out.height, Date().timeIntervalSince(ts),
-                         outputURL(1).lastPathComponent))
-        } catch { fail(error.localizedDescription) }
-        finish(0)
-    }
-
-    if let benchTE {
-        // a 1-step 256x256 image per prompt: the stable-diffusion.cpp log has get_learned_condition's time
-        for (i, text) in benchTE.split(separator: "|").enumerated() {
-            var p = SDCppParameters(prompt: String(text))
-            p.negativePrompt = negative.isEmpty ? "worst quality, low quality \(i)" : negative + " \(i)"
-            p.width = 256
-            p.height = 256
-            p.steps = 1
-            let t = Date()
-            _ = try? engine.generate(p)
-            print(String(format: "prompt %d: image %.2fs", i + 1, Date().timeIntervalSince(t)))
-        }
-        finish(0)
-    }
-
-    if let detailPath = detailOnly {
-        // face repair alone on an existing image (WAI-ANIMA), to time and compare its settings
-        guard let img = loadRGB(detailPath), let faceDetector else { fail("--detail-only needs an image and --face-repair") }
-        do {
-            for run in 1 ... repeats {
-                let tf = Date()
-                var dp = SDCppDetailParameters(prompt: prompt)
-                dp.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }
-                dp.negativePrompt = negative
-                dp.steps = faceSteps ?? steps ?? 25
-                dp.cfg = cfg ?? 4.5
-                if let samplerName { dp.sampler = samplerName }
-                dp.scheduler = schedulerName
-                dp.seed = Int64(truncatingIfNeeded: seed)
-                dp.strength = faceStrength
-                dp.inpaintSize = faceSize ?? 0
-                dp.stepCache = faceCache
-                let fixed = try animaFaceRepair(engine, img, dp, detectorPath: faceDetector)
-                FileHandle.standardError.write(Data("\n".utf8))
-                try Image(MLXArray(fixed.pixels, [fixed.height, fixed.width, 3], type: UInt8.self)).save(url: outputURL(run))
-                print(String(format: "face repair %.2fs (size %d, %d steps x %.2f) -> %@", Date().timeIntervalSince(tf),
-                             dp.inpaintSize, dp.steps, dp.strength, outputURL(run).lastPathComponent))
-            }
-        } catch { fail(error.localizedDescription) }
-        finish(0)
-    }
-
-    for run in 1 ... repeats {
-        var p = SDCppParameters(prompt: prompt)
-            p.loras = loras.map { SDCppLoRA(path: $0.url.path, multiplier: $0.strength) }   // its own model + text encoder
-        p.negativePrompt = negative
-        if let width { p.width = width }
-        if let height { p.height = height }
-        if let steps { p.steps = steps }
-        if let cfg { p.cfg = cfg }
-        if let samplerName { p.sampler = samplerName }
-        p.scheduler = schedulerName
-        p.seed = Int64(truncatingIfNeeded: seed &+ UInt64(run - 1))
-        if let hires { p.hiresScale = hires }
-        if let hiresSteps { p.hiresSteps = hiresSteps }
-        if let hiresDenoise { p.hiresDenoise = hiresDenoise }
-        p.hiresModelPath = hiresUpscalerPath
-        p.stepCache = stepCache
-        let ts = Date()
-        do {
-            let img = try engine.generate(p) { stage, done, total in
-                if total > 0 { showProgress(stage, Int(done), Int(total)) }
-            }
-            FileHandle.standardError.write(Data("\n".utf8))
-            var final = img
-            var faceLine = ""
-            if let faceDetector {
-                // like the app: sd.cpp's ADetailer with this context (MLX model and VAE through the hooks)
-                try Image(MLXArray(img.pixels, [img.height, img.width, 3], type: UInt8.self))
-                    .save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
-                let tf = Date()
-                var dp = SDCppDetailParameters(prompt: prompt)
-                dp.loras = p.loras
-                dp.negativePrompt = negative
-                dp.steps = faceSteps ?? p.steps
-                dp.cfg = p.cfg
-                dp.sampler = p.sampler
-                dp.scheduler = p.scheduler
-                dp.seed = p.seed
-                dp.strength = faceStrength
-                dp.inpaintSize = faceSize ?? 0
-                dp.stepCache = faceCache
-                final = try animaFaceRepair(engine, img, dp, detectorPath: faceDetector)
-                FileHandle.standardError.write(Data("\n".utf8))
-                faceLine = String(format: " | face repair %.2fs", Date().timeIntervalSince(tf))
-            }
-            let array = MLXArray(final.pixels, [final.height, final.width, 3], type: UInt8.self)
-            try Image(array).save(url: outputURL(run))
-            if hookTiming {
-                print(String(format: "MLX diffusion hook: %d calls, %.2fs (%.3f s/call)", hookCalls, hookSeconds,
-                             hookSeconds / Double(max(hookCalls, 1))))
-                hookSeconds = 0
-                hookCalls = 0
-            }
-            print(String(format: "run %d seed %lld | %dx%d | total %.2fs%@ -> %@", run, p.seed, img.width,
-                         img.height, Date().timeIntervalSince(ts), faceLine, outputURL(run).lastPathComponent))
-        } catch { fail(error.localizedDescription) }
-    }
 } else {
     // ---------------- WAI Illustrious through MLX
     guard let modelPath else { fail("--model (or --diffusion-model for Anima) is required") }
@@ -496,7 +341,7 @@ if let diffusionPath {
     }
     if let hires { params.hiresScale = hires }
     if let hiresSteps { params.hiresSteps = hiresSteps }
-    params.stepCache = sdxlStepCache
+    params.stepCache = stepCacheThreshold
     if let hiresDenoise { params.hiresDenoise = hiresDenoise }
 
     let tLoad = Date()
@@ -546,14 +391,13 @@ if let diffusionPath {
         print("upscaler: \((hiresUpscalerPath as NSString).lastPathComponent)")
         hiresUpscale = { img, w, h in
             let u8 = (img[0] * 255).round().asType(.uint8)
-            let rgb = RGBImage(width: u8.dim(1), height: u8.dim(0), pixels: u8.asData(access: .copy).data)
-            let big = try upscaleImage(rgb, model: hiresUpscalerPath).resized(width: w, height: h)
+            let big = try upscaleImage(RGBImage(u8), model: hiresUpscalerPath).resized(width: w, height: h)
             return MLXArray(big.pixels, [1, h, w, 3], type: UInt8.self).asType(.float32) / 255
         }
     }
 
     if let refinePath {
-        guard let src = loadRGB(refinePath) else { fail("couldn't read \(refinePath)") }
+        guard let src = RGBImage.load(URL(fileURLWithPath: refinePath)) else { fail("couldn't read \(refinePath)") }
         var p = params
         p.seed = seed
         let w = Int((Double(src.width) * refineScale / 8).rounded()) * 8
@@ -571,19 +415,8 @@ if let diffusionPath {
         finish(0)
     }
 
-    // face repair: stable-diffusion.cpp ADetailer with the same checkpoint (as the app does)
-    var detailEngine: SDCppEngine?
-    var detector: SDCppFaceDetector?
-    var mlxDetector: YOLOFaceDetector?
-    if let faceDetector {
-        do {
-            if detectEngine == "sdcpp" || faceEngine == "sdcpp" {
-                detector = try SDCppFaceDetector(model: URL(fileURLWithPath: faceDetector))
-            }
-            if detectEngine == "mlx" { mlxDetector = try YOLOFaceDetector(url: URL(fileURLWithPath: faceDetector)) }
-            if faceEngine == "sdcpp" { detailEngine = try SDCppEngine(checkpoint: URL(fileURLWithPath: modelPath)) }
-        } catch { fail("face repair setup: \(error.localizedDescription)") }
-    }
+    let detector = faceDetector.flatMap { try? YOLOFaceDetector(url: URL(fileURLWithPath: $0)) }
+    if faceDetector != nil, detector == nil { fail("couldn't load the face detector") }
 
     for run in 1 ... repeats {
         var p = params
@@ -604,13 +437,11 @@ if let diffusionPath {
                 if phase == .sample || phase == .hires, i > 0 { showProgress(phase.rawValue, i, n) }
             }
             FileHandle.standardError.write(Data("\n".utf8))
-            if detailEngine == nil, detector != nil || mlxDetector != nil {
-                // MLX face repair: sd.cpp only finds the faces, this engine repaints them
+            if let detector {
                 let tf = Date()
                 try Image(image).save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
-                let rgb = RGBImage(width: image.dim(1), height: image.dim(0), pixels: image.asData(access: .copy).data)
-                let faces = try mlxDetector.map { $0.detect(rgb: rgb.pixels, width: rgb.width, height: rgb.height) }
-                    ?? detector!.detect(rgb).map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
+                let rgb = RGBImage(image)
+                let faces = detector.detect(rgb: rgb.pixels, width: rgb.width, height: rgb.height)
                 let td = Date().timeIntervalSince(tf)
                 var settings = FaceRepairSettings()
                 settings.strength = faceStrength
@@ -618,25 +449,7 @@ if let diffusionPath {
                                                    settings: settings) { _, done, total in showProgress("face", done, total) }
                 FileHandle.standardError.write(Data("\n".utf8))
                 image = MLXArray(fixed, [rgb.height, rgb.width, 3], type: UInt8.self)
-                print(String(format: "face repair (MLX) %.2fs: %d face(s), detection %.2fs", Date().timeIntervalSince(tf),
-                             faces.count, td))
-            }
-            if let detailEngine, let detector {
-                let tf = Date()
-                try Image(image).save(url: URL(fileURLWithPath: (outputURL(run).path as NSString).deletingPathExtension + "_before.png"))
-                let rgb = RGBImage(width: image.dim(1), height: image.dim(0), pixels: image.asData(access: .copy).data)
-                var dp = SDCppDetailParameters(prompt: prompt)
-                dp.negativePrompt = negative
-                dp.steps = p.steps
-                dp.cfg = p.cfg
-                dp.seed = Int64(truncatingIfNeeded: p.seed)
-                dp.strength = faceStrength
-                let fixed = try detailEngine.detail(rgb, detector: detector, dp) { _, done, total in
-                    if total > 0 { showProgress("face", Int(done), Int(total)) }
-                }
-                FileHandle.standardError.write(Data("\n".utf8))
-                image = MLXArray(fixed.pixels, [fixed.height, fixed.width, 3], type: UInt8.self)
-                print(String(format: "face repair %.2fs", Date().timeIntervalSince(tf)))
+                print(String(format: "face repair %.2fs: %d face(s), detection %.3fs", Date().timeIntervalSince(tf), faces.count, td))
             }
             try Image(image).save(url: outputURL(run))
             var line = String(
@@ -654,11 +467,3 @@ if let diffusionPath {
 }
 
 finish(0)
-
-/// Leave without running C++ static destructors: ggml's Metal backend asserts in one of them that every
-/// GPU buffer was freed, and the engines here live until exit, so a normal exit() aborts.
-func finish(_ code: Int32) -> Never {
-    fflush(stdout)
-    fflush(stderr)
-    _exit(code)
-}

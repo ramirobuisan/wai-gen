@@ -69,8 +69,15 @@ public final class AnimaDiT {
             let module = String(key.dropLast(".weight".count))
             underscored[module.replacingOccurrences(of: ".", with: "_")] = module
         }
+        // LoRA (lora_down/up, lora_A/B), LoHa (hada_*) and LoKr (lokr_*), with stable-diffusion.cpp's scale rules
+        let suffixes = [".lora_down.weight", ".lora_A.default.weight", ".lora_A.weight", ".lora_up.weight",
+                        ".lora_B.default.weight", ".lora_B.weight", ".hada_w1_a", ".hada_w1_b", ".hada_w2_a", ".hada_w2_b",
+                        ".hada_t1", ".hada_t2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b", ".lokr_w1", ".lokr_w2",
+                        ".alpha"]
+        let role: [String: String] = [".lora_down.weight": "down", ".lora_A.default.weight": "down", ".lora_A.weight": "down",
+                                      ".lora_up.weight": "up", ".lora_B.default.weight": "up", ".lora_B.weight": "up"]
         for lora in loras {
-            var parts: [String: (down: MLXArray?, up: MLXArray?, alpha: Float?)] = [:]
+            var parts: [String: [String: MLXArray]] = [:]
             for (key, value) in try loadArrays(url: lora.url) {
                 var k = key
                 for prefix in ["model.diffusion_model.net.", "model.diffusion_model.", "diffusion_model.net.", "diffusion_model.",
@@ -78,29 +85,47 @@ public final class AnimaDiT {
                     k = String(k.dropFirst(prefix.count))
                     break
                 }
-                let suffixes: [(String, Int)] = [(".lora_down.weight", 0), (".lora_A.default.weight", 0), (".lora_A.weight", 0),
-                                                  (".lora_up.weight", 1), (".lora_B.default.weight", 1), (".lora_B.weight", 1),
-                                                  (".alpha", 2)]
-                guard let (suffix, kind) = suffixes.first(where: { k.hasSuffix($0.0) }) else { continue }
+                guard let suffix = suffixes.first(where: { k.hasSuffix($0) }) else { continue }
                 var module = String(k.dropLast(suffix.count))
+                if module.hasSuffix(".weight") { module = String(module.dropLast(7)) }   // "x.weight.hada_w1_a" naming
                 if w[module + ".weight"] == nil, let m = underscored[module] { module = m }
-                var entry = parts[module] ?? (nil, nil, nil)
-                switch kind {
-                case 0: entry.down = value
-                case 1: entry.up = value
-                default: entry.alpha = value.asType(.float32).item(Float.self)
-                }
-                parts[module] = entry
+                parts[module, default: [:]][role[suffix] ?? String(suffix.dropFirst())] = value.asType(.float32)
             }
             for (module, p) in parts {
                 let key = module + ".weight"
-                guard let down = p.down, let up = p.up, let base = w[key], down.ndim == 2, up.ndim == 2,
-                      up.dim(0) == base.dim(0), down.dim(1) == base.dim(1)
-                else { report.unmatched.append(module); continue }
-                let rank = Float(down.dim(0))
-                let scale = lora.strength * (p.alpha ?? rank) / rank
+                guard let base = w[key], base.ndim == 2, p["hada_t1"] == nil, p["hada_t2"] == nil else {
+                    report.unmatched.append(module)
+                    continue
+                }
+                let alpha = p["alpha"].map { $0.item(Float.self) }
+                var delta: MLXArray? = nil
+                var scale: Float = 1
+                if let down = p["down"], let up = p["up"], down.ndim == 2, up.ndim == 2 {
+                    let rank = Float(down.dim(0))
+                    delta = matmul(up, down)
+                    scale = (alpha ?? rank) / rank
+                } else if let w1a = p["hada_w1_a"], let w1b = p["hada_w1_b"], let w2a = p["hada_w2_a"], let w2b = p["hada_w2_b"] {
+                    delta = matmul(w1a, w1b) * matmul(w2a, w2b)
+                    if let alpha { scale = alpha / Float(w1b.dim(0)) }
+                } else {
+                    var rank = 1
+                    var w1 = p["lokr_w1"], w2 = p["lokr_w2"]
+                    if w1 == nil, let a = p["lokr_w1_a"], let b = p["lokr_w1_b"] { w1 = matmul(a, b); rank = b.dim(0) }
+                    if w2 == nil, let a = p["lokr_w2_a"], let b = p["lokr_w2_b"] { w2 = matmul(a, b); rank = b.dim(0) }
+                    if let w1, let w2, w1.ndim == 2, w2.ndim == 2 {
+                        // Kronecker product
+                        delta = (w1[0..., .newAxis, 0..., .newAxis] * w2[.newAxis, 0..., .newAxis, 0...])
+                            .reshaped(w1.dim(0) * w2.dim(0), w1.dim(1) * w2.dim(1))
+                        if let alpha { scale = alpha / Float(rank) }
+                        if rank == 1 { scale = 1 }
+                    }
+                }
+                guard let d = delta, d.dim(0) == base.dim(0), d.dim(1) == base.dim(1) else {
+                    report.unmatched.append(module)
+                    continue
+                }
                 if original[key] == nil { original[key] = base }
-                w[key] = (base.asType(.float32) + matmul(up.asType(.float32), down.asType(.float32)) * scale).asType(dtype)
+                w[key] = (w[key]!.asType(.float32) + d * (scale * lora.strength)).asType(dtype)
                 report.applied += 1
             }
         }

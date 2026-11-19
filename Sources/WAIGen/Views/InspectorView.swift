@@ -94,7 +94,7 @@ struct InspectorView: View {
                               range: 5 ... 40, step: 1, format: "%.0f")
                     SliderRow(title: "Denoise", value: $model.settings.hiresDenoise, range: 0.1 ... 0.8, step: 0.05, format: "%.2f")
                     Picker("Upscaler", selection: $model.settings.hiresUpscaler) {
-                        Text(preset.engine == .mlx ? "Built-in (bicubic)" : "Built-in (Lanczos)").tag("")
+                        Text(preset.engine == .sdxl ? "Built-in (bicubic)" : "Built-in (high-quality resize)").tag("")
                         ForEach(model.upscalerFiles, id: \.name) { f in
                             Text("\((f.name as NSString).deletingPathExtension) ×\(f.scale)").tag(f.name)
                         }

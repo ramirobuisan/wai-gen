@@ -15,6 +15,25 @@ public final class RealESRGAN {
         public let errorDescription: String?
     }
 
+    /// The scale (4) when `url` is a model this class can run, nil otherwise (other architectures such as
+    /// DAT / SwinIR / HAT, e.g. 4x-UltraSharpV2). Safetensors are checked from their header only.
+    public static func probe(_ url: URL) -> Int? {
+        if url.pathExtension.lowercased() == "safetensors" {
+            guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? h.close() }
+            guard let lenData = try? h.read(upToCount: 8), lenData.count == 8 else { return nil }
+            let len = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+            guard len < 100_000_000, let header = try? h.read(upToCount: Int(len)),
+                  let json = try? JSONSerialization.jsonObject(with: header) as? [String: Any] else { return nil }
+            let keys = Set(json.keys.map { k in
+                k.hasPrefix("params_ema.") ? String(k.dropFirst(11)) : k.hasPrefix("params.") ? String(k.dropFirst(7)) : k
+            })
+            return ["conv_first.weight", "conv_up1.weight", "conv_up2.weight", "conv_last.weight", "body.0.rdb1.conv1.weight"]
+                .allSatisfy(keys.contains) ? 4 : nil
+        }
+        return (try? RealESRGAN(url: url)) != nil ? 4 : nil
+    }
+
     public init(url: URL, dtype: DType = .float16) throws {
         var raw = url.pathExtension.lowercased() == "pth" ? try TorchCheckpoint.load(url: url) : try loadArrays(url: url)
         // BasicSR files keep the weights under "params_ema" (preferred) or "params"

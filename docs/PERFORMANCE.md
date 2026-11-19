@@ -350,9 +350,45 @@ models can't fully take (LoHa / LoKr, or text-encoder layers) still runs entirel
 
 So the gain is ~0.25 s on the first image after the model loads and ~0.01 s per new prompt after that.
 
+## Round 6 (2026-11-20): stable-diffusion.cpp removed
+
+What stable-diffusion.cpp still did for WAI-ANIMA cost 0.10 s of 32 s (see below), so this round isn't about
+speed: it ports the rest so the app has no C++ inference library left. `WaiAnima.swift` reimplements the
+pipeline and `AnimaText.swift` the prompt handling, line by line from stable-diffusion.cpp, and each part was
+checked against it (with the sd.cpp hooks as probes) before the dependency was dropped:
+
+| Part | Check | Result |
+|---|---|---|
+| `(tag:1.2)` parser, Qwen2 BPE and T5 unigram tokenizers | token ids and weights for 14 prompts (weights, escapes, BREAK, special tokens, accents, CJK, emoji, extra spaces) | **identical** |
+| Philox noise generator | 16 384 values for one seed | 16 261 bit-identical, the rest within 7e-7 (its float math is vectorised differently) |
+| discrete-flow schedule (shift 3), timesteps | sigmas and the timesteps the model receives | identical |
+| CFG, model call, Wan latent normalisation, decode | a 1-step image | **bit-identical** |
+| Euler, 12 steps | full image | 40.6 dB (the 1e-7 noise differences grow over the steps) |
+| Euler a, 12 steps | full image | 28.9 dB, the same picture (ancestral noise amplifies tiny differences) |
+| masked img2img (face repair) | same face, 1024 px | 49.4 dB |
+| EasyCache 0.5 | steps skipped, 25-step image | 8 / 25 in both, same time |
+| speed | 12 steps at 1024×1344, back to back | 14.9-17.0 s vs 16.8-17.2 s (load noise) |
+
+Running both CFG passes as one MLX graph was ~10 % slower than evaluating them one after the other, so they're
+evaluated separately. WaiAnima keeps MLX's buffer cache at 2 GB like the SDXL engine: a hi-res job peaked at 34 GB
+with an unbounded cache and **16 GB** with it, at the same speed (71.9 vs 73.1 s, 78.2 vs 79.1 s).
+
+LoRAs: the MLX model now also merges **LoHa** (`hada_*`) and **LoKr** (`lokr_*`) with stable-diffusion.cpp's scale
+rules. Checked with synthetic files: a LoHa whose second factor is all ones and a 1x1 LoKr give images
+bit-identical to the equivalent plain LoRA. (stable-diffusion.cpp itself crashed on the LoKr test file,
+`GGML_ASSERT(ggml_can_mul_mat)`, and applied the LoHa more weakly.) Text-encoder layers in a WAI-ANIMA LoRA are
+not applied (none of the WAI-ANIMA LoRAs checked have them).
+
+Also gone with it: the 978 MB vendored checkout, the CMake build step, the patch with its four hooks, the
+ggml exit-time assert workaround. The app is 22 MB instead of 61 MB. Upscaler models the MLX ESRGAN port can't
+run (e.g. `4x-UltraSharpV2`, a DAT transformer) are no longer listed.
+
+In the app (cold, model loading in the background, Step cache off): WAI-ANIMA 1024×1344 → 1536×2016 with
+face repair 145 s (154-158 s with stable-diffusion.cpp under similar load); WAI v16 54.5 s including its load.
+
 ## Possible next steps
 
-- Every model now runs in MLX; stable-diffusion.cpp keeps WAI-ANIMA's tokenizers, sampler and masked img2img.
+- Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.
   Measured what that costs (`WAIGEN_HOOK_TIMING=1` adds up the time inside the MLX diffusion hook): 1024×1344,
   25 steps, sampling 31.97 s of which 31.87 s is the MLX model, so **0.10 s (0.3 %)** is stable-diffusion.cpp's
   sampler, CFG and data copies. With every hook set it loads none of its own weights (its log lists 5.4 GB it would

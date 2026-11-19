@@ -3,14 +3,17 @@
 # WAI Gen
 
 A native macOS app (SwiftUI) for generating anime images with the **WAI** model family. It runs
-the models itself: no Python, no ComfyUI server, no Electron. It does what
+the models itself, entirely in [MLX](https://github.com/ml-explore/mlx-swift): no Python, no ComfyUI server,
+no Electron, no C++ inference library. It does what
 [Character Select SAA](https://github.com/mirabarukaso/character_select_stand_alone_app) does on top of
 ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt), as one app.
 
 | Model | Engine |
 |---|---|
 | WAI-illustrious-SDXL v16 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
-| WAI-ANIMA v1.0 | **MLX** for the diffusion model, Qwen3 text encoder, VAE, upscaler and face detector; **stable-diffusion.cpp** for the tokenizers, sampler and masked img2img |
+| WAI-ANIMA v1.0 | **MLX**: the Anima diffusion model, Qwen3 text encoder, Qwen-Image VAE, tokenizers and flow sampler ported from stable-diffusion.cpp (same seeds give the same images) |
+
+The ESRGAN upscaler and the YOLOv8 face detector run in MLX too.
 
 Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-res, negatives).
 
@@ -48,6 +51,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 | Face detector (YOLOv8m), warm | **0.011 s** (MLX) | 0.068-0.27 s (stable-diffusion.cpp) |
 | WAI-ANIMA text encoder, first prompt / later prompts | **0.08 s / 0.01 s** (MLX) | 0.33 s / 0.02 s |
 | WAI-ANIMA 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **76 s** | 157 s before the step cache, 750 s with stable-diffusion.cpp alone |
+| App size | **22 MB** | 61 MB with stable-diffusion.cpp linked in |
 
 The MLX VAE and upscaler match stable-diffusion.cpp's output (PSNR 53.9 dB and 60.6 dB). They are also
 published on their own: [mlx-swift-qwen-image-vae](https://github.com/ramirobuisan/mlx-swift-qwen-image-vae)
@@ -57,10 +61,9 @@ More numbers, including what was tried and dropped: [docs/PERFORMANCE.md](docs/P
 
 ## Build
 
-Requirements: Apple silicon, macOS 14+, Xcode 16+, CMake.
+Requirements: Apple silicon, macOS 14+, Xcode 16+.
 
 ```bash
-scripts/build-sdcpp.sh          # stable-diffusion.cpp at the tested commit + patches/stable-diffusion.cpp.patch
 scripts/make-app.sh --install   # Release build -> ~/Applications/WAI Gen.app
 swift scripts/make-icon.swift   # only to redraw the app icon (Resources/AppIcon.icns)
 ```
@@ -85,14 +88,19 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 Character data, thumbnails and the tag list are downloaded on first start from Character Select SAA's
 data (or copied from an existing SAA install).
 
-## How the WAI-ANIMA speed-up works
+## How WAI-ANIMA runs in MLX
 
-stable-diffusion.cpp runs WAI-ANIMA's Qwen-Image (Wan 2.1) VAE through ggml's 3D convolutions, which
-take minutes at hi-res sizes on Metal. `patches/stable-diffusion.cpp.patch` adds `sd_set_vae_hook()`: when an
-app registers it, every single-image VAE encode/decode in that context (txt2img, img2img, hi-res, face
-repair) calls the app instead, and stable-diffusion.cpp keeps doing the latent normalisation. WAI Gen
-answers with an MLX implementation of the VAE. For one frame the causal 3D VAE is exactly a 2D VAE
-(only the last temporal slice of each kernel sees the image), so it runs as fast as an SDXL VAE.
+WAI-ANIMA first ran through stable-diffusion.cpp. Piece by piece it moved to MLX, each piece checked against
+stable-diffusion.cpp's output before it replaced it (details in [docs/PERFORMANCE.md](docs/PERFORMANCE.md)):
+
+- the Qwen-Image (Wan 2.1) VAE: for one frame the causal 3D VAE is exactly a 2D VAE (only the last temporal
+  slice of each kernel sees the image), so it runs as fast as an SDXL VAE (0.27 s instead of ~45 s);
+- the Anima DiT (Cosmos-Predict2 style, with its LLM adapter), 2x faster per step, LoRA / LoHa / LoKr merged in;
+- the Qwen3-0.6B text encoder, the Qwen2 BPE and T5 unigram tokenizers and the `(tag:1.2)` prompt weights
+  (token ids identical to stable-diffusion.cpp's);
+- the sampler: Philox noise, the shift-3 discrete-flow schedules, Euler / Euler a / DPM++ 2M, CFG, img2img,
+  masked img2img for face repair and the EasyCache step cache. A one-step image is bit-identical to
+  stable-diffusion.cpp's; full images match visually (same seed, same picture).
 
 The ESRGAN upscaler runs in MLX too. `.pth` files are read by a small loader that only accepts plain
 tensor dictionaries and never executes pickle code.
@@ -101,7 +109,9 @@ tensor dictionaries and never executes pickle code.
 
 - [mlx-swift](https://github.com/ml-explore/mlx-swift) and the StableDiffusion code of
   [mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples) (MIT, Apple; see `THIRD_PARTY_LICENSE_mlx-swift-examples.txt`)
-- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (MIT)
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (MIT, see `THIRD_PARTY_LICENSE_stable-diffusion.cpp.txt`): the WAI-ANIMA
+  pipeline, tokenizers, sampler, ADetailer geometry and YOLOv8 decoding are ported from it; the Qwen2 BPE merges
+  and T5 vocabulary in `Sources/WaiMLX/Resources` are the ones it embeds (Qwen and Google T5 tokenizers, Apache-2.0)
 - [Character Select SAA](https://github.com/mirabarukaso/character_select_stand_alone_app) (MIT) for the character data and the workflow this app reproduces
 - Sampling and checkpoint-key conventions follow [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and k-diffusion; CLIP BPE vocabulary from OpenAI CLIP (MIT)
 - The WAI models are by WAI0731; check each model's license on Civitai before using the images

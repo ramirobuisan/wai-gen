@@ -1,8 +1,9 @@
 import Foundation
 
+/// Which pipeline runs a preset (both are MLX).
 enum EngineKind: String, Codable {
-    case mlx = "MLX"
-    case sdcpp = "stable-diffusion.cpp"
+    case sdxl = "MLX"
+    case anima = "MLX (Anima)"
 }
 
 /// Sampler choices shown in the app, mapped to each engine's own names.
@@ -142,7 +143,7 @@ enum ModelCatalog {
 
     static let presets: [ModelPreset] = [
         ModelPreset(
-            id: "wai-v16", name: "WAI Illustrious v16", engine: .mlx,
+            id: "wai-v16", name: "WAI Illustrious v16", engine: .sdxl,
             checkpoint: "checkpoints/waiIllustriousSDXL_v160.safetensors",
             diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
             defaults: PresetDefaults(
@@ -151,7 +152,7 @@ enum ModelCatalog {
                 qualityPrefix: "masterpiece, best quality, amazing quality", negative: waiNegative),
             source: "Civitai 827184 v16.0: Euler a, 15-30 steps, CFG 5-7, >1024², hires 1.5x/20 steps/denoise 0.35-0.5"),
         ModelPreset(
-            id: "wai-anima", name: "WAI-ANIMA v1.0", engine: .sdcpp, checkpoint: nil,
+            id: "wai-anima", name: "WAI-ANIMA v1.0", engine: .anima, checkpoint: nil,
             diffusionModel: "diffusion_models/waiANIMA_v10Base10.safetensors",
             llm: "text_encoders/qwen_3_06b_base.safetensors", vae: "vae/qwen_image_vae.safetensors",
             characterList: .anima,

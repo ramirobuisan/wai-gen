@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import ImageIO
 import Observation
-import WaiSDCpp
+import WaiMLX
 
 struct ProgressInfo: Equatable {
     var title: String
@@ -47,7 +47,7 @@ final class AppModel {
     var errorMessage: String?
     var showInspector = true
     var loraFiles: [LoRAFile] = []
-    /// Upscaler models stable-diffusion.cpp can load: (file name, scale)
+    /// Upscaler models WAI Gen can run: (file name, scale)
     var upscalerFiles: [(name: String, scale: Int)] = []
 
     nonisolated static var upscalerFolder: URL { AppPaths.models.appendingPathComponent("upscale_models", isDirectory: true) }
@@ -58,8 +58,16 @@ final class AppModel {
             let names = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
                 .filter { ["pth", "safetensors", "gguf"].contains(($0 as NSString).pathExtension.lowercased()) }
                 .sorted()
-            let usable = names.compactMap { n in SDCppUpscaler.probeScale(folder.appendingPathComponent(n)).map { (n, $0) } }
-            await MainActor.run { self.upscalerFiles = usable }
+            // only models the MLX upscaler runs (ESRGAN / RRDBNet); others such as 4x-UltraSharpV2 (DAT) are hidden
+            let usable = names.compactMap { n in RealESRGAN.probe(folder.appendingPathComponent(n)).map { (n, $0) } }
+            await MainActor.run {
+                self.upscalerFiles = usable
+                // a saved choice that exists but can't run (e.g. 4x-UltraSharpV2) falls back to a usable one
+                let chosen = self.settings.hiresUpscaler
+                if !chosen.isEmpty, names.contains(chosen), !usable.contains(where: { $0.0 == chosen }) {
+                    self.settings.hiresUpscaler = usable.first?.0 ?? ""
+                }
+            }
         }
     }
 

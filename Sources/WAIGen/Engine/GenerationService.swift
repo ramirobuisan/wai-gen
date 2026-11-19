@@ -3,7 +3,6 @@ import Foundation
 import ImageIO
 import MLX
 import WaiMLX
-import WaiSDCpp
 
 struct JobLoRA: Sendable {
     let url: URL
@@ -73,10 +72,16 @@ struct JobResult: Sendable {
 
 extension ModelPreset: @unchecked Sendable {}
 
+struct GenerationError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+
 /// Runs jobs one at a time on a dedicated queue and keeps the models loaded between jobs: the selected
-/// image model with its helpers (upscaler, face detector, face-repair context). With "keep every image
-/// model loaded" (off by default) the other image models stay in memory too, so switching is instant.
-/// `preload` loads them in the background, always after any waiting job.
+/// image model with its helpers (upscaler, face detector). With "keep every image model loaded" (off by
+/// default) the other image models stay in memory too, so switching is instant. `preload` loads them in
+/// the background, always after any waiting job. Everything runs in MLX: WaiSDXL (WAI-illustrious) and
+/// WaiAnima (WAI-ANIMA).
 final class GenerationService: @unchecked Sendable {
     static let keepLoadedKey = "keepModelsLoaded"
     static let preloadKey = "preloadModels"
@@ -84,12 +89,8 @@ final class GenerationService: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "waigen.engine", qos: .userInitiated)
     // everything below is only touched on `queue`
-    private var mlx: [String: WaiSDXL] = [:]
-    private var sdcpp: [String: SDCppEngine] = [:]
-    /// MLX diffusion models standing in for stable-diffusion.cpp's (WAI-ANIMA), by preset id
-    private var mlxDiT: [String: MLXDiTBridge] = [:]
-    /// MLX Qwen3 text encoders standing in for stable-diffusion.cpp's (WAI-ANIMA), by preset id
-    private var mlxTE: [String: Qwen3TextEncoder] = [:]
+    private var sdxl: [String: WaiSDXL] = [:]
+    private var anima: [String: WaiAnima] = [:]
     private var detector: YOLOFaceDetector?
     private var upscalers: [URL: ModelUpscaler] = [:]
     private var preloadSteps: [(name: String, load: () throws -> Void)] = []
@@ -100,25 +101,19 @@ final class GenerationService: @unchecked Sendable {
 
     private let lock = NSLock()
     private var cancelled = false
-    private var activeSDCpp: SDCppEngine?
     private var waitingJobs = 0
 
-    /// Stops any running job and frees every model. Call before the app exits: ggml's Metal backend
-    /// asserts at process exit (in a static destructor) that no GPU buffers are still alive, so quitting
-    /// with stable-diffusion.cpp contexts loaded aborts ("quit unexpectedly"). False if the running job
+    /// Stops any running job and frees every model (call before the app exits). False if the running job
     /// didn't stop within `timeout`.
     func shutdown(timeout: TimeInterval = 20) -> Bool {
         cancel()
         let done = DispatchSemaphore(value: 0)
         queue.async {
-            self.setActive(nil)
             self.preloadSteps.removeAll()
-            self.sdcpp.removeAll()
-            self.mlxDiT.removeAll()
-            self.mlxTE.removeAll()
+            self.anima.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
-            self.mlx.removeAll()
+            self.sdxl.removeAll()
             done.signal()
         }
         return done.wait(timeout: .now() + timeout) == .success
@@ -127,21 +122,13 @@ final class GenerationService: @unchecked Sendable {
     func cancel() {
         lock.lock()
         cancelled = true
-        let sd = activeSDCpp
         lock.unlock()
-        sd?.cancel()
     }
 
     private var isCancelled: Bool {
         lock.lock()
         defer { lock.unlock() }
         return cancelled
-    }
-
-    private func setActive(_ e: SDCppEngine?) {
-        lock.lock()
-        activeSDCpp = e
-        lock.unlock()
     }
 
     func run(_ job: GenerationJob, progress: @escaping @Sendable (JobProgress) -> Void) async throws -> JobResult {
@@ -165,8 +152,6 @@ final class GenerationService: @unchecked Sendable {
                     cont.resume(returning: result)
                 } catch is WaiCancelled {
                     cont.resume(throwing: CancellationError())
-                } catch SDCppError.cancelled {
-                    cont.resume(throwing: CancellationError())
                 } catch {
                     cont.resume(throwing: error)
                 }
@@ -174,58 +159,40 @@ final class GenerationService: @unchecked Sendable {
         }
     }
 
-    // MARK: engines
-
-    private func path(_ job: GenerationJob, _ rel: String?) -> URL { job.modelsRoot.appendingPathComponent(rel ?? "") }
-
     // MARK: model cache
 
     /// Unless every model may stay loaded, drop the ones `keep` doesn't need.
     private func makeRoom(keeping id: String) {
         guard !Self.keepAllLoaded else { return }
-        mlx = mlx.filter { $0.key == id }
-        sdcpp = sdcpp.filter { $0.key == id }
-        mlxDiT = mlxDiT.filter { $0.key == id }
-        mlxTE = mlxTE.filter { $0.key == id }
+        sdxl = sdxl.filter { $0.key == id }
+        anima = anima.filter { $0.key == id }
         Memory.clearCache()
     }
 
-    private func loadMLX(_ p: ModelPreset, _ root: URL) throws -> WaiSDXL {
-        if let e = mlx[p.id] { return e }
+    private func loadSDXL(_ p: ModelPreset, _ root: URL) throws -> WaiSDXL {
+        if let e = sdxl[p.id] { return e }
         makeRoom(keeping: p.id)
         let e = try WaiSDXL(checkpoint: root.appendingPathComponent(p.checkpoint ?? ""))
-        mlx[p.id] = e
+        sdxl[p.id] = e
         names[p.id] = p.name
         Memory.clearCache()
         reportModels()
         return e
     }
 
-    private func loadSDCpp(_ p: ModelPreset, _ root: URL) throws -> SDCppEngine {
-        if let e = sdcpp[p.id] { return e }
+    private func loadAnima(_ p: ModelPreset, _ root: URL) throws -> WaiAnima {
+        if let e = anima[p.id] { return e }
         makeRoom(keeping: p.id)
         func file(_ rel: String?) -> URL { root.appendingPathComponent(rel ?? "") }
-        let e = try SDCppEngine(diffusionModel: file(p.diffusionModel), llm: file(p.llm), vae: file(p.vae))
-        // its VAE runs in MLX (sd.cpp's Metal VAE takes minutes at hi-res sizes); sd.cpp's own is the fallback
-        if let vae = try? QwenImageVAE(url: file(p.vae)) { e.externalVAE = MLXVAEBridge(vae) }
-        // and so does the diffusion model (sd.cpp then never loads its own copy of the weights)
-        if let dit = try? AnimaDiT(url: file(p.diffusionModel)) {
-            let bridge = MLXDiTBridge(dit)
-            e.externalDiffusion = bridge
-            if e.externalDiffusionActive { mlxDiT[p.id] = bridge } else { e.externalDiffusion = nil }
-        }
-        // and the Qwen3 text encoder's forward pass (tokenizing stays in sd.cpp; its copy is never loaded)
-        if let llm = p.llm, let te = try? Qwen3TextEncoder(url: file(llm)) {
-            e.externalTextEncoder = te
-            if e.externalTextEncoderActive { mlxTE[p.id] = te } else { e.externalTextEncoder = nil }
-        }
-        sdcpp[p.id] = e
+        let e = try WaiAnima(diffusionModel: file(p.diffusionModel), llm: file(p.llm), vae: file(p.vae))
+        anima[p.id] = e
         names[p.id] = p.name
+        Memory.clearCache()
         reportModels()
         return e
     }
 
-    /// YOLOv8 face detector in MLX (same boxes as stable-diffusion.cpp's, ~6x faster; docs/PERFORMANCE.md round 5)
+    /// YOLOv8 face detector in MLX (docs/PERFORMANCE.md round 5)
     private func loadDetector(_ root: URL) throws -> YOLOFaceDetector {
         if let d = detector { return d }
         let d = try YOLOFaceDetector(url: root.appendingPathComponent("detectors/face_yolov8m.safetensors"))
@@ -234,7 +201,7 @@ final class GenerationService: @unchecked Sendable {
     }
 
     private func reportModels(loading: String? = nil) {
-        let loaded = Set(mlx.keys).union(sdcpp.keys).compactMap { names[$0] }.sorted()
+        let loaded = Set(sdxl.keys).union(anima.keys).compactMap { names[$0] }.sorted()
         onModelsChanged?(loaded, loading)
     }
 
@@ -246,10 +213,8 @@ final class GenerationService: @unchecked Sendable {
             var sharedAdded = false
             for p in presets where p.missingFiles(in: root).isEmpty {
                 switch p.engine {
-                case .mlx:
-                    steps.append((p.name, { _ = try self.loadMLX(p, root) }))   // repaints faces itself
-                case .sdcpp:
-                    steps.append((p.name, { _ = try self.loadSDCpp(p, root) }))
+                case .sdxl: steps.append((p.name, { _ = try self.loadSDXL(p, root) }))
+                case .anima: steps.append((p.name, { _ = try self.loadAnima(p, root) }))
                 }
                 if !sharedAdded {   // right after the first model: what its first image needs
                     sharedAdded = true
@@ -289,10 +254,8 @@ final class GenerationService: @unchecked Sendable {
     func unloadAll() {
         queue.async {
             self.preloadSteps.removeAll()
-            self.mlx.removeAll()
-            self.sdcpp.removeAll()
-            self.mlxDiT.removeAll()
-            self.mlxTE.removeAll()
+            self.sdxl.removeAll()
+            self.anima.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             Memory.clearCache()
@@ -302,42 +265,30 @@ final class GenerationService: @unchecked Sendable {
 
     // MARK: engines for a job
 
-    private func mlxEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiSDXL {
+    private var loraSpecs: (GenerationJob) -> [LoRASpec] = { job in
+        job.loras.map { LoRASpec(url: $0.url, strength: Float($0.strength)) }
+    }
+
+    private func sdxlEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiSDXL {
         let p = job.preset
-        if mlx[p.id] == nil { progress(.loadingModel(p.name)) }
-        let engine = try loadMLX(p, job.modelsRoot)
-        let report = try engine.setLoRAs(job.loras.map { LoRASpec(url: $0.url, strength: Float($0.strength)) })
+        if sdxl[p.id] == nil { progress(.loadingModel(p.name)) }
+        let engine = try loadSDXL(p, job.modelsRoot)
+        let report = try engine.setLoRAs(loraSpecs(job))
         if !report.unmatched.isEmpty || report.unsupported > 0 {
             FileHandle.standardError.write(Data(
-                "LoRA: \(report.unmatched.count) unmatched layers, \(report.unsupported) unsupported tensors (LoHa/LoKr)\n".utf8))
+                "LoRA: \(report.unmatched.count) unmatched layers, \(report.unsupported) unsupported tensors\n".utf8))
         }
         return engine
     }
 
-    private func sdcppEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> SDCppEngine {
+    private func animaEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiAnima {
         let p = job.preset
-        if sdcpp[p.id] == nil { progress(.loadingModel(p.name)) }
-        let engine = try loadSDCpp(p, job.modelsRoot)
-        if let bridge = mlxDiT[p.id] {
-            // LoRAs are merged into the MLX model too; only a LoRA it can't fully map (LoHa, LoKr, ...)
-            // sends the job back to stable-diffusion.cpp's own model, which applies it itself
-            var useMLX = true
-            do {
-                let report = try bridge.model.setLoRAs(job.loras.map { LoRASpec(url: $0.url, strength: Float($0.strength)) })
-                if !report.unmatched.isEmpty {
-                    FileHandle.standardError.write(Data("MLX Anima LoRA: \(report.unmatched.count) unmatched modules, using stable-diffusion.cpp's model\n".utf8))
-                    _ = try? bridge.model.setLoRAs([])
-                    useMLX = false
-                }
-            } catch {
-                _ = try? bridge.model.setLoRAs([])
-                useMLX = false
-            }
-            let wanted: SDCppExternalDiffusion? = useMLX ? bridge : nil
-            if (engine.externalDiffusion == nil) != (wanted == nil) { engine.externalDiffusion = wanted }
-            // a LoRA the MLX models can't fully take (it may also patch the text encoder) goes to sd.cpp whole
-            let wantedTE: SDCppExternalTextEncoder? = useMLX ? mlxTE[p.id] : nil
-            if (engine.externalTextEncoder == nil) != (wantedTE == nil) { engine.externalTextEncoder = wantedTE }
+        if anima[p.id] == nil { progress(.loadingModel(p.name)) }
+        let engine = try loadAnima(p, job.modelsRoot)
+        // LoRA, LoHa and LoKr merge into the MLX model; anything else (e.g. text-encoder layers) is skipped
+        let report = try engine.dit.setLoRAs(loraSpecs(job))
+        if !report.unmatched.isEmpty {
+            FileHandle.standardError.write(Data("WAI-ANIMA LoRA: \(report.unmatched.count) modules not applied\n".utf8))
         }
         return engine
     }
@@ -349,19 +300,17 @@ final class GenerationService: @unchecked Sendable {
         return up
     }
 
-    /// Hi-res upscale hook for the MLX engine: the upscaler model (x4), then a high-quality
-    /// resample to the hi-res size.
-    private func mlxUpscaler(_ url: URL) throws -> WaiSDXL.HiresUpscaler {
+    /// Hi-res upscale hook for WaiSDXL: the upscaler model (x4), then a high-quality resample.
+    private func sdxlUpscaler(_ url: URL) throws -> WaiSDXL.HiresUpscaler {
         let up = try modelUpscaler(url)
         return { img, w, h in
             let u8 = (img[0] * 255).round().asType(.uint8)
-            let rgb = RGBImage(width: u8.dim(1), height: u8.dim(0), pixels: u8.asData(access: .copy).data)
-            let big = try up.upscale(rgb).resized(width: w, height: h)
+            let big = try up.upscale(RGBImage(u8)).resized(width: w, height: h)
             return MLXArray(big.pixels, [1, h, w, 3], type: UInt8.self).asType(.float32) / 255
         }
     }
 
-    private func mlxPreview(_ job: GenerationJob, _ progress: @escaping (JobProgress) -> Void) -> ((MLXArray) -> Void)? {
+    private func preview(_ job: GenerationJob, _ progress: @escaping (JobProgress) -> Void) -> ((MLXArray) -> Void)? {
         guard job.livePreview else { return nil }
         return { arr in
             if let cg = ImageFiles.cgImage(rgb: arr.asData(access: .copy).data, width: arr.dim(1), height: arr.dim(0)) {
@@ -370,52 +319,13 @@ final class GenerationService: @unchecked Sendable {
         }
     }
 
-    private func sdPreview(_ job: GenerationJob, _ progress: @escaping (JobProgress) -> Void) -> ((RGBImage) -> Void)? {
-        guard job.livePreview else { return nil }
-        return { img in
-            if let cg = ImageFiles.cgImage(rgb: img.pixels, width: img.width, height: img.height) { progress(.preview(cg)) }
-        }
-    }
-
-    private func mlxPhase(_ progress: @escaping (JobProgress) -> Void) -> (GenerationPhase, Int, Int) -> Void {
+    private func sdxlPhase(_ progress: @escaping (JobProgress) -> Void) -> (GenerationPhase, Int, Int) -> Void {
         { phase, i, n in
             switch phase {
             case .encode: progress(.encoding)
             case .sample: progress(.sampling(step: i, total: n, hires: false))
             case .hires: progress(.sampling(step: i, total: n, hires: true))
             case .decode: progress(.decoding)
-            }
-        }
-    }
-
-    /// `hasHiresPass`: a second sampling pass will follow the first one, so a step counter that
-    /// starts over means the hi-res pass has begun. Without it every pass is the base pass.
-    private func sdProgress(_ progress: @escaping (JobProgress) -> Void, firstPassIsHires: Bool = false,
-                            hasHiresPass: Bool = false)
-        -> (String, Int64, Int64) -> Void
-    {
-        var hiresPass = firstPassIsHires
-        var lastDone: Int64 = -1
-        // between the upscale and the first hi-res step sd.cpp re-reads the prompt and VAE-encodes the
-        // upscaled image without step events (minutes for WAI-ANIMA at 1536x2016): keep one label for it
-        var preparingHires = false
-        return { stage, done, total in
-            let s = stage.lowercased()
-            if s.contains("decode") {
-                progress(.decoding)
-            } else if s.contains("upscal") {
-                // hi-res upscale between the passes (the ESRGAN model can take a while on big images)
-                if hasHiresPass { hiresPass = true; preparingHires = true }
-                progress(.upscaling)
-            } else if s.contains("sampl") || s.contains("denois"), total > 0 {
-                if hasHiresPass, lastDone > 1, done < lastDone { hiresPass = true }
-                lastDone = done
-                preparingHires = false
-                progress(.sampling(step: Int(done), total: Int(total), hires: hiresPass))
-            } else if preparingHires {
-                progress(.preparingHires)
-            } else if s.contains("cond") || s.contains("encod") || s.contains("text") {
-                progress(.encoding)
             }
         }
     }
@@ -435,30 +345,52 @@ final class GenerationService: @unchecked Sendable {
             sp.hiresSteps = h.steps
             sp.hiresDenoise = Float(h.denoise)
         }
-        if job.stepCache { sp.stepCache = Self.sdxlStepCache }
+        if job.stepCache { sp.stepCache = Self.stepCacheThreshold }
         return sp
     }
 
-    /// Step cache settings measured in docs/PERFORMANCE.md (round 4): the most steps skipped while the
-    /// image stays visibly the same.
-    static let sdxlStepCache: Float = 0.5
-    static let animaStepCache = SDCppStepCache(mode: "easycache", options: ["reuse_threshold": 0.5])
-    /// WAI-ANIMA face repaint size when every face crop fits in it.
-    static let animaFaceSize = 768
+    private func animaParameters(_ job: GenerationJob) -> AnimaParameters {
+        var p = AnimaParameters(prompt: job.positive)
+        p.negativePrompt = job.negative
+        p.width = job.width
+        p.height = job.height
+        p.steps = job.steps
+        p.cfg = Float(job.cfg)
+        p.sampler = switch job.sampler {
+        case .eulerA: .eulerAncestral
+        case .euler: .euler
+        case .dpmpp2m: .dpmpp2m
+        }
+        p.scheduler = switch job.scheduler {
+        case .normal: .discrete   // WAI-ANIMA's default (stable-diffusion.cpp's "discrete")
+        case .karras: .karras
+        case .simple: .simple
+        }
+        p.seed = job.seed
+        if job.stepCache { p.stepCache = Self.stepCacheThreshold }
+        return p
+    }
 
-    private func sdcppParameters(_ job: GenerationJob) -> SDCppParameters {
-        var sp = SDCppParameters(prompt: job.positive)
-        sp.loras = job.loras.map { SDCppLoRA(path: $0.url.path, multiplier: Float($0.strength)) }
-        sp.negativePrompt = job.negative
-        sp.width = job.width
-        sp.height = job.height
-        sp.steps = job.steps
-        sp.cfg = Float(job.cfg)
-        sp.sampler = job.sampler.sdcppName
-        sp.scheduler = job.scheduler.sdcppName
-        sp.seed = job.seed
-        if job.stepCache { sp.stepCache = Self.animaStepCache }
-        return sp
+    /// Step cache (EasyCache) threshold for both models, measured in docs/PERFORMANCE.md (round 4): the
+    /// most steps skipped while the image stays visibly the same.
+    static let stepCacheThreshold: Float = 0.5
+
+    /// WAI-ANIMA img2img at `size` from `image` (hi-res fix and gallery Upscale): runs `steps` steps of a
+    /// steps/denoise schedule, like the hi-res pass of WAI v16.
+    private func animaRefine(_ engine: WaiAnima, _ job: GenerationJob, _ image: RGBImage, width: Int, height: Int,
+                             steps: Int, denoise: Double, progress: @escaping (JobProgress) -> Void) throws -> RGBImage {
+        var p = animaParameters(job)
+        p.width = width
+        p.height = height
+        p.initImage = image.resized(width: width, height: height).pixels
+        p.strength = Float(denoise)
+        p.steps = Int((Double(steps) / max(denoise, 0.05)).rounded(.up))   // runs steps x strength of them
+        if isCancelled { throw CancellationError() }
+        progress(.preparingHires)
+        let out = try engine.generate(p, isCancelled: { self.isCancelled }, preview: preview(job, progress)) { i, n in
+            progress(.sampling(step: i, total: n, hires: true))
+        }
+        return RGBImage(out)
     }
 
     // MARK: text to image
@@ -468,43 +400,30 @@ final class GenerationService: @unchecked Sendable {
         var image: RGBImage
 
         switch job.preset.engine {
-        case .mlx:
-            let engine = try mlxEngine(job, progress)
-            let hiresUpscale = try job.hires != nil ? job.hiresUpscaler.map { try mlxUpscaler($0) } : nil
+        case .sdxl:
+            let engine = try sdxlEngine(job, progress)
+            let hiresUpscale = try job.hires != nil ? job.hiresUpscaler.map { try sdxlUpscaler($0) } : nil
             let (array, _) = try engine.generate(
                 sdxlParameters(job), hiresUpscale: hiresUpscale, isCancelled: { self.isCancelled },
-                preview: mlxPreview(job, progress), progress: mlxPhase(progress))
-            image = RGBImage(width: array.dim(1), height: array.dim(0), pixels: array.asData(access: .copy).data)
+                preview: preview(job, progress), progress: sdxlPhase(progress))
+            image = RGBImage(array)
 
-        case .sdcpp:
-            let engine = try sdcppEngine(job, progress)
+        case .anima:
+            let engine = try animaEngine(job, progress)
             if isCancelled { throw CancellationError() }
-            setActive(engine)
-            defer { setActive(nil) }
-            var sp = sdcppParameters(job)
-            if let h = job.hires, let u = job.hiresUpscaler, let up = try? modelUpscaler(u), up.runsInMLX {
-                // hi-res fix done here so the upscaler runs in MLX: base pass, upscale, img2img at the new size
-                let base = try engine.generate(sp, preview: sdPreview(job, progress), progress: sdProgress(progress))
-                if isCancelled { throw CancellationError() }
+            progress(.encoding)
+            let base = try engine.generate(animaParameters(job), isCancelled: { self.isCancelled },
+                                           preview: preview(job, progress)) { i, n in
+                progress(.sampling(step: i, total: n, hires: false))
+            }
+            image = RGBImage(base)
+            if let h = job.hires {
+                // hi-res fix: upscaler model (or a resize), then img2img at the new size
                 progress(.upscaling)
-                let tw = Int(Double(job.width) * h.scale / 16) * 16
-                let th = Int(Double(job.height) * h.scale / 16) * 16
-                sp.initImage = try up.upscale(base).resized(width: tw, height: th)
-                sp.width = tw
-                sp.height = th
-                sp.strength = Float(h.denoise)
-                sp.steps = Int((Double(h.steps) / max(h.denoise, 0.05)).rounded(.up))   // sd.cpp runs steps x strength
-                if isCancelled { throw CancellationError() }
-                image = try engine.generate(sp, preview: sdPreview(job, progress), progress: sdProgress(progress, firstPassIsHires: true))
-            } else {
-                if let h = job.hires {
-                    sp.hiresScale = Float(h.scale)
-                    sp.hiresSteps = h.steps
-                    sp.hiresDenoise = Float(h.denoise)
-                    sp.hiresModelPath = job.hiresUpscaler?.path
-                }
-                image = try engine.generate(sp, preview: sdPreview(job, progress),
-                                            progress: sdProgress(progress, hasHiresPass: job.hires != nil))
+                if let u = job.hiresUpscaler { image = try modelUpscaler(u).upscale(image) }
+                image = try animaRefine(engine, job, image, width: Int(Double(job.width) * h.scale / 16) * 16,
+                                        height: Int(Double(job.height) * h.scale / 16) * 16, steps: h.steps,
+                                        denoise: h.denoise, progress: progress)
             }
         }
 
@@ -518,7 +437,7 @@ final class GenerationService: @unchecked Sendable {
         throws -> JobResult
     {
         let t0 = Date()
-        guard let source = loadRGB(up.source) else { throw SDCppError.generation("couldn't read \(up.source.lastPathComponent)") }
+        guard let source = RGBImage.load(up.source) else { throw GenerationError("couldn't read \(up.source.lastPathComponent)") }
 
         if !up.detailPass {
             progress(.upscaling)
@@ -531,34 +450,24 @@ final class GenerationService: @unchecked Sendable {
         let denoise = job.hires?.denoise ?? 0.4
         var image: RGBImage
         switch job.preset.engine {
-        case .mlx:
-            let engine = try mlxEngine(job, progress)
+        case .sdxl:
+            let engine = try sdxlEngine(job, progress)
             var sp = sdxlParameters(job)
             sp.hiresSteps = steps
             sp.hiresDenoise = Float(denoise)
-            let src = MLXArray(source.pixels, [source.height, source.width, 3], type: UInt8.self)
             progress(.upscaling)
             let out = try engine.refine(
-                src, sp, width: up.width, height: up.height, upscale: try job.hiresUpscaler.map { try mlxUpscaler($0) },
-                isCancelled: { self.isCancelled }, preview: mlxPreview(job, progress), progress: mlxPhase(progress))
-            image = RGBImage(width: out.dim(1), height: out.dim(0), pixels: out.asData(access: .copy).data)
+                source.array, sp, width: up.width, height: up.height, upscale: try job.hiresUpscaler.map { try sdxlUpscaler($0) },
+                isCancelled: { self.isCancelled }, preview: preview(job, progress), progress: sdxlPhase(progress))
+            image = RGBImage(out)
 
-        case .sdcpp:
-            let engine = try sdcppEngine(job, progress)
+        case .anima:
+            let engine = try animaEngine(job, progress)
             progress(.upscaling)
             var img = source
             if let u = job.hiresUpscaler { img = try modelUpscaler(u).upscale(img) }
-            img = img.resized(width: up.width / 16 * 16, height: up.height / 16 * 16)
-            if isCancelled { throw CancellationError() }
-            setActive(engine)
-            defer { setActive(nil) }
-            var sp = sdcppParameters(job)
-            sp.width = img.width
-            sp.height = img.height
-            sp.initImage = img
-            sp.strength = Float(denoise)
-            sp.steps = Int((Double(steps) / max(denoise, 0.05)).rounded(.up))   // sd.cpp runs steps x strength
-            image = try engine.generate(sp, preview: sdPreview(job, progress), progress: sdProgress(progress, firstPassIsHires: true))
+            image = try animaRefine(engine, job, img, width: up.width / 16 * 16, height: up.height / 16 * 16,
+                                    steps: steps, denoise: denoise, progress: progress)
         }
 
         let repair = try repairFaces(image, job, progress)
@@ -579,78 +488,32 @@ final class GenerationService: @unchecked Sendable {
         guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
         var settings = FaceRepairSettings()
         settings.strength = Float(fr.strength)
-        if job.preset.engine == .mlx {
-            // WAI v16: the MLX engine (already loaded, LoRAs applied) repaints the faces the way
-            // stable-diffusion.cpp's ADetailer would, ~3x faster
-            let engine = try loadMLX(job.preset, job.modelsRoot)
+        let faceProgress: (Int, Int, Int) -> Void = { _, step, total in progress(.faceRepair(step: step, total: total)) }
+        let fixed: Data
+        switch job.preset.engine {
+        case .sdxl:
+            // the engine that made the image (LoRAs applied) repaints each face like ADetailer
+            let engine = try loadSDXL(job.preset, job.modelsRoot)
             var p = sdxlParameters(job)
             if !fr.prompt.isEmpty { p.prompt = fr.prompt }
-            let fixed = try engine.repairFaces(
-                rgb: image.pixels, width: image.width, height: image.height, faces: faces, p, settings: settings,
-                isCancelled: { self.isCancelled }) { _, step, total in progress(.faceRepair(step: step, total: total)) }
-            return (RGBImage(width: image.width, height: image.height, pixels: fixed), Date().timeIntervalSince(tf))
-        }
-        // WAI-ANIMA: the same geometry, each crop repainted by stable-diffusion.cpp's masked img2img (what its
-        // ADetailer runs), at 768 px unless a face crop is bigger than that (close-ups): half the time of
-        // 1024 px with the same look at the size the face is pasted back (docs/PERFORMANCE.md, round 4)
-        let engine = try sdcppEngine(job, progress)
-        setActive(engine)
-        defer { setActive(nil) }
-        let size = FaceRepairGeometry.largestCrop(faces, settings: settings) > Self.animaFaceSize ? 1024 : Self.animaFaceSize
-        settings.inpaintSize = size
-        let fixed = try FaceRepairGeometry.apply(
-            rgb: image.pixels, width: image.width, height: image.height, faces: faces, settings: settings
-        ) { crop, mask, i in
-            if self.isCancelled { throw CancellationError() }
-            var sp = sdcppParameters(job)
-            if !fr.prompt.isEmpty { sp.prompt = fr.prompt }
-            sp.width = size
-            sp.height = size
-            sp.initImage = RGBImage(width: size, height: size, pixels: Data(crop))
-            sp.maskImage = Data(mask.map { $0 > 0 ? 255 : 0 })
-            sp.strength = Float(fr.strength)
-            sp.seed = job.seed &+ Int64(i)
-            let out = try engine.generate(sp) { stage, done, total in
-                if total > 0, !stage.lowercased().contains("decode") {
-                    progress(.faceRepair(step: Int(done), total: Int(total)))
-                }
-            }
-            return [UInt8](out.pixels)
+            fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
+                                           settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
+        case .anima:
+            // 768 px repaints unless a face crop is bigger (close-ups): half the time of 1024 px, same look
+            let engine = try loadAnima(job.preset, job.modelsRoot)
+            var p = animaParameters(job)
+            if !fr.prompt.isEmpty { p.prompt = fr.prompt }
+            settings.inpaintSize = WaiAnima.faceRepaintSize(faces, settings: settings)
+            fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
+                                           settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
         }
         return (RGBImage(width: image.width, height: image.height, pixels: fixed), Date().timeIntervalSince(tf))
     }
 
     private func result(_ image: RGBImage, start: Date, faceRepairSeconds: Double?) throws -> JobResult {
         guard let cg = ImageFiles.cgImage(rgb: image.pixels, width: image.width, height: image.height) else {
-            throw SDCppError.generation("could not build the image")
+            throw GenerationError("could not build the image")
         }
         return JobResult(image: cg, seconds: Date().timeIntervalSince(start), faceRepairSeconds: faceRepairSeconds)
-    }
-
-    /// Read any image file as RGB8.
-    private func loadRGB(_ url: URL) -> RGBImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
-        else { return nil }
-        let w = cg.width, h = cg.height
-        var rgba = Data(count: w * h * 4)
-        let ok = rgba.withUnsafeMutableBytes { buf -> Bool in
-            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
-            else { return false }
-            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-            return true
-        }
-        guard ok else { return nil }
-        var rgb = Data(count: w * h * 3)
-        rgba.withUnsafeBytes { s in
-            rgb.withUnsafeMutableBytes { d in
-                let sp = s.bindMemory(to: UInt8.self)
-                let dp = d.bindMemory(to: UInt8.self)
-                for i in 0 ..< w * h { dp[i * 3] = sp[i * 4]; dp[i * 3 + 1] = sp[i * 4 + 1]; dp[i * 3 + 2] = sp[i * 4 + 2] }
-            }
-        }
-        return RGBImage(width: w, height: h, pixels: rgb)
     }
 }
