@@ -2,6 +2,8 @@
 
 ## 2026-11-19 (evening)
 
+- Inspector: the model menu sits in the toolbar strip above it (no empty band), section titles are buttons
+  (clicking the title collapses the section).
 - WAI-ANIMA's diffusion model runs in MLX (2× faster per step); WAI-ANIMA hi-res + face repair 346 s → 157 s.
 - Faster: face repair for WAI v16/v12 runs in MLX (17.3 s → 6.0 s per image), hi-res fix uses 15 steps
   (WAI-ANIMA hi-res 214.7 s → 174.9 s), the MLX UNet runs compiled. Details in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).

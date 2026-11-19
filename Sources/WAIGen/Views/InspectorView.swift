@@ -4,7 +4,6 @@ struct InspectorView: View {
     @Environment(AppModel.self) private var model
 
     // collapsible sections (remembered)
-    @AppStorage("inspector.openModel") private var openModel = true
     @AppStorage("inspector.openImage") private var openImage = true
     @AppStorage("inspector.openHires") private var openHires = true
     @AppStorage("inspector.openLoRA") private var openLoRA = true
@@ -19,11 +18,7 @@ struct InspectorView: View {
         let missing = model.missingModelFiles
 
         Form {
-            CollapsibleSection(title: "Model", isExpanded: $openModel) {
-                Picker("Model", selection: Binding(get: { preset }, set: { model.selectModel($0) })) {
-                    ForEach(ModelCatalog.presets) { Text($0.name).tag($0) }
-                }
-                .labelsHidden()
+            Section {
                 if !missing.isEmpty {
                     Label("Model files missing", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -185,6 +180,26 @@ struct InspectorView: View {
             }
         }
         .formStyle(.grouped)
+        // the model picker lives in the toolbar strip above the inspector (that strip was empty),
+        // and the settings start right under it
+        .contentMargins(.top, 0, for: .scrollContent)
+        .toolbar {
+            ToolbarItem {
+                // a toolbar Picker only shows its arrows; a Menu shows the model's name
+                Menu {
+                    Picker("Model", selection: Binding(get: { preset }, set: { model.selectModel($0) })) {
+                        ForEach(ModelCatalog.presets) { Text($0.name).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    Text(preset.name)
+                }
+                .menuIndicator(.visible)
+                .fixedSize()
+                .help("Model (⌘1 / ⌘2 / ⌘3)")
+            }
+        }
     }
 }
 
@@ -295,12 +310,15 @@ struct CollapsibleSection<Content: View>: View {
         Section(isExpanded: $isExpanded) {
             content()
         } header: {
-            Text(title)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityHint(isExpanded ? "Collapses the section" : "Expands the section")
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+            } label: {
+                Text(title)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(isExpanded ? "Collapses the section" : "Expands the section")
         }
     }
 }
