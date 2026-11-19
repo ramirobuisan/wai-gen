@@ -151,15 +151,6 @@ enum ModelCatalog {
                 qualityPrefix: "masterpiece, best quality, amazing quality", negative: waiNegative),
             source: "Civitai 827184 v16.0: Euler a, 15-30 steps, CFG 5-7, >1024², hires 1.5x/20 steps/denoise 0.35-0.5"),
         ModelPreset(
-            id: "wai-v12", name: "WAI Illustrious v12", engine: .mlx,
-            checkpoint: "checkpoints/waiNSFWIllustrious_v120.safetensors",
-            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai120,
-            defaults: PresetDefaults(
-                width: 1024, height: 1344, steps: 30, cfg: 6, sampler: .eulerA, scheduler: .normal,
-                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
-                qualityPrefix: "masterpiece, best quality, amazing quality", negative: waiNegative),
-            source: "Civitai 827184 v12.0: Euler a, 25-40 steps, CFG 5-7, >1024², hires 1.5x/20 steps/denoise 0.35-0.5"),
-        ModelPreset(
             id: "wai-anima", name: "WAI-ANIMA v1.0", engine: .sdcpp, checkpoint: nil,
             diffusionModel: "diffusion_models/waiANIMA_v10Base10.safetensors",
             llm: "text_encoders/qwen_3_06b_base.safetensors", vae: "vae/qwen_image_vae.safetensors",

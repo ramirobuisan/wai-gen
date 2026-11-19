@@ -2,6 +2,7 @@
 
 ## 2026-11-20
 
+- Removed the WAI v12 preset (the older version of WAI-illustrious-SDXL); WAI-ANIMA is now ⌘2.
 - Fast mode (opt-in, inspector ▸ Image): DPM++ 2M Karras 16 steps on WAI v16/v12 (−32 %), Euler 16 steps on
   WAI-ANIMA (−28 %).
 - WAI-ANIMA LoRAs run on the MLX model (no longer fall back to stable-diffusion.cpp's model): ~1.7× faster.

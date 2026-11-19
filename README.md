@@ -9,7 +9,7 @@ ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt)
 
 | Model | Engine |
 |---|---|
-| WAI-illustrious-SDXL v16, v12 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
+| WAI-illustrious-SDXL v16 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
 | WAI-ANIMA v1.0 | **MLX** for the diffusion model, VAE and upscaler; **stable-diffusion.cpp** for the Qwen3 text encoder, sampler and face detector |
 
 Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-res, negatives).
@@ -70,7 +70,7 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 
 | File | Where |
 |---|---|
-| `checkpoints/waiIllustriousSDXL_v160.safetensors` (and/or v12) | [WAI-illustrious-SDXL on Civitai](https://civitai.com/models/827184) |
+| `checkpoints/waiIllustriousSDXL_v160.safetensors` | [WAI-illustrious-SDXL on Civitai](https://civitai.com/models/827184) |
 | `diffusion_models/waiANIMA_v10Base10.safetensors` | WAI-ANIMA on Civitai |
 | `text_encoders/qwen_3_06b_base.safetensors`, `vae/qwen_image_vae.safetensors` | [Comfy-Org](https://huggingface.co/Comfy-Org) repackaged files |
 | `upscale_models/RealESRGAN_x4plus_anime_6B.pth` | [Real-ESRGAN releases](https://github.com/xinntao/Real-ESRGAN/releases) |

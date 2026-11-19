@@ -550,7 +550,7 @@ final class GenerationService: @unchecked Sendable {
         let tf = Date()
         let detector = try loadDetector(job.modelsRoot)
         if job.preset.engine == .mlx {
-            // WAI v16 / v12: sd.cpp's YOLO only finds the faces; the MLX engine (already loaded, LoRAs
+            // WAI v16: sd.cpp's YOLO only finds the faces; the MLX engine (already loaded, LoRAs
             // applied) repaints them the way sd.cpp's ADetailer would, ~3x faster
             let faces = try detector.detect(image, confidence: Float(fr.confidence))
                 .map { FaceBox(x1: $0.x1, y1: $0.y1, x2: $0.x2, y2: $0.y2, confidence: $0.confidence) }
