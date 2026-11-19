@@ -3,6 +3,14 @@ import SwiftUI
 struct InspectorView: View {
     @Environment(AppModel.self) private var model
 
+    // collapsible sections (remembered)
+    @AppStorage("inspector.openModel") private var openModel = true
+    @AppStorage("inspector.openImage") private var openImage = true
+    @AppStorage("inspector.openHires") private var openHires = true
+    @AppStorage("inspector.openLoRA") private var openLoRA = true
+    @AppStorage("inspector.openFaceRepair") private var openFaceRepair = true
+    @AppStorage("inspector.openPrompt") private var openPrompt = true
+
     private static let sizes: [(Int, Int)] = [(1024, 1344), (832, 1216), (896, 1152), (1024, 1024), (1152, 896), (1216, 832), (1344, 1024)]
 
     var body: some View {
@@ -11,7 +19,7 @@ struct InspectorView: View {
         let missing = model.missingModelFiles
 
         Form {
-            Section("Model") {
+            CollapsibleSection(title: "Model", isExpanded: $openModel) {
                 Picker("Model", selection: Binding(get: { preset }, set: { model.selectModel($0) })) {
                     ForEach(ModelCatalog.presets) { Text($0.name).tag($0) }
                 }
@@ -32,9 +40,17 @@ struct InspectorView: View {
                     }
                     .help(preset.source)
                 }
+                if let loading = model.backgroundLoading {
+                    Label("Loading \(loading) in the background…", systemImage: "arrow.down.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !model.loadedModels.isEmpty {
+                    Label("In memory: \(model.loadedModels.joined(separator: ", "))", systemImage: "memorychip")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help("Model ▸ Unload All Models frees the memory")
+                }
             }
 
-            Section("Image") {
+            CollapsibleSection(title: "Image", isExpanded: $openImage) {
                 Picker("Size", selection: Binding(
                     get: { "\(model.settings.width)x\(model.settings.height)" },
                     set: { v in
@@ -64,7 +80,7 @@ struct InspectorView: View {
                     .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
             }
 
-            Section("Hi-res fix") {
+            CollapsibleSection(title: "Hi-res fix", isExpanded: $openHires) {
                 Toggle("Enabled", isOn: $model.settings.hiresEnabled)
                 if model.settings.hiresEnabled {
                     SliderRow(title: "Scale", value: $model.settings.hiresScale,
@@ -88,7 +104,7 @@ struct InspectorView: View {
                 }
             }
 
-            Section("LoRA") {
+            CollapsibleSection(title: "LoRA", isExpanded: $openLoRA) {
                 ForEach($model.settings.loras) { $sel in
                     let file = model.loraFiles.first { $0.relativePath == sel.relativePath }
                     VStack(alignment: .leading, spacing: 4) {
@@ -135,7 +151,7 @@ struct InspectorView: View {
                 }
             }
 
-            Section("Face repair") {
+            CollapsibleSection(title: "Face repair", isExpanded: $openFaceRepair) {
                 Toggle("Enabled", isOn: $model.settings.faceRepair)
                     .help("Finds faces with a YOLOv8 detector and repaints each one at 1024×1024, like ADetailer")
                 if model.settings.faceRepair {
@@ -152,7 +168,7 @@ struct InspectorView: View {
                 }
             }
 
-            Section("Prompt") {
+            CollapsibleSection(title: "Prompt", isExpanded: $openPrompt) {
                 Toggle("Quality tags", isOn: $model.settings.useQualityPrefix)
                 if model.settings.useQualityPrefix {
                     TextField("Quality tags", text: $model.settings.qualityPrefix, axis: .vertical)
@@ -265,6 +281,26 @@ struct ImageInfoView: View {
         GridRow {
             Text(k).foregroundStyle(.secondary)
             Text(v).textSelection(.enabled)
+        }
+    }
+}
+
+/// A form section whose whole title row (not only the disclosure arrow) collapses and expands it.
+struct CollapsibleSection<Content: View>: View {
+    let title: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        Section(isExpanded: $isExpanded) {
+            content()
+        } header: {
+            Text(title)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(isExpanded ? "Collapses the section" : "Expands the section")
         }
     }
 }

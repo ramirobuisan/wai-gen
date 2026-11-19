@@ -4,6 +4,8 @@ import SwiftUI
 @main
 struct WAIGenApp: App {
     @State private var model = AppModel()
+    @AppStorage("showPromptPanel") private var showPrompt = true
+    @AppStorage("showGallery") private var showGallery = true
 
     init() {
         // also behave like a normal app when launched as a bare executable during development
@@ -32,6 +34,19 @@ struct WAIGenApp: App {
             CommandGroup(after: .sidebar) {
                 Button(model.showInspector ? "Hide Inspector" : "Show Inspector") { model.showInspector.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
+                Button(showPrompt ? "Hide Prompt" : "Show Prompt") { withAnimation { showPrompt.toggle() } }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
+                Button(showGallery ? "Hide Gallery" : "Show Gallery") { withAnimation { showGallery.toggle() } }
+                    .keyboardShortcut("g", modifiers: [.command, .option])
+                Divider()
+                Button("Zoom In") { model.zoom.zoomIn() }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("Zoom Out") { model.zoom.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") { model.zoom.actualSize() }
+                    .keyboardShortcut("0", modifiers: .command)
+                Button("Zoom to Fit") { model.zoom.fit() }
+                    .keyboardShortcut("9", modifiers: .command)
             }
             CommandMenu("Model") {
                 ForEach(Array(ModelCatalog.presets.enumerated()), id: \.element.id) { i, p in
@@ -52,6 +67,10 @@ struct WAIGenApp: App {
                 }
                 Button("Remove All LoRAs") { model.settings.loras.removeAll() }
                     .disabled(model.settings.loras.isEmpty)
+                Divider()
+                Button("Load All Models") { model.preloadModels() }
+                Button("Unload All Models") { model.unloadModels() }
+                    .disabled(model.isBusy)
             }
             CommandMenu("Image") {
                 Button("Upscale with Detail Pass") { if let s = model.selection { model.upscale(s, detail: true) } }
@@ -143,6 +162,9 @@ struct SettingsView: View {
     @State private var modelsPath = AppPaths.models.path
     @State private var outputPath = AppPaths.output.path
     @State private var aiURL = AIPrompt.baseURL
+    @AppStorage(GenerationService.keepLoadedKey) private var keepAllLoaded = false
+    @AppStorage(GenerationService.preloadKey) private var preloadAtLaunch = true
+    @AppStorage(AppModel.idleMinutesKey) private var idleMinutes = 5
 
     var body: some View {
         Form {
@@ -168,6 +190,23 @@ struct SettingsView: View {
                 Text("Any OpenAI-compatible server. MLX-Serve listens on 127.0.0.1:11234 by default.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Memory") {
+                Toggle("Load the model, upscaler and face repair in advance", isOn: $preloadAtLaunch)
+                Text("When the app opens and when you pick another model, so the first image doesn't wait for them.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Keep every image model loaded", isOn: $keepAllLoaded)
+                Text("Off: only the selected model stays in memory. On: switching between WAI v16, v12 and WAI-ANIMA is instant (about 14 GB with face repair).")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Free the memory after", selection: $idleMinutes) {
+                    Text("5 minutes idle").tag(5)
+                    Text("15 minutes idle").tag(15)
+                    Text("30 minutes idle").tag(30)
+                    Text("1 hour idle").tag(60)
+                    Text("Never").tag(0)
+                }
+                Text("Idle = nothing generating. They load again when you come back to the app or press Generate.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Data") {
                 Button("Open wildcards folder") { NSWorkspace.shared.open(AppPaths.wildcards) }
                 Button("Open character data folder") { NSWorkspace.shared.open(AppPaths.data) }
@@ -182,7 +221,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 460)
+        .frame(width: 560, height: 600)
     }
 
     private func choose(_ done: (URL) -> Void) {

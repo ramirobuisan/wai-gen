@@ -121,9 +121,16 @@ struct ModelPreset: Identifiable, Hashable {
 enum ModelCatalog {
     // Recommended settings from the WAI0731 model pages on Civitai (2026-11).
     // "nsfw" is added to the negatives as the WAI author suggests; remove it in the app if wanted.
-    static let waiNegative = "bad quality, worst quality, worst detail, sketch, censor, nsfw"
+    // The watermark tags stop the Patreon / signature text these models learned from their training images.
+    static let waiNegative =
+        "bad quality, worst quality, worst detail, sketch, censor, watermark, signature, artist name, patreon username, patreon logo, web address, nsfw"
     static let animaNegative =
-        "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, lowres, censor, nsfw"
+        "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, lowres, censor, watermark, signature, patreon username, patreon logo, web address, nsfw"
+    /// Earlier default negatives, upgraded to the current ones when found unchanged in saved settings.
+    static let legacyNegatives: [String: String] = [
+        "bad quality, worst quality, worst detail, sketch, censor, nsfw": waiNegative,
+        "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, lowres, censor, nsfw": animaNegative,
+    ]
 
     static let presets: [ModelPreset] = [
         ModelPreset(

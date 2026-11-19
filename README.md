@@ -17,9 +17,14 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - Character sidebar with the 5000+ characters and thumbnails of Character Select SAA, favourites, search
 - Danbooru tag autocomplete, `(tag:1.2)` weights, wildcards (`__name__`, nested)
 - Hi-res fix with an ESRGAN upscaler (e.g. RealESRGAN x4plus anime 6B), face repair (ADetailer-style, YOLOv8 face detector)
+- Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw
 - LoRAs for both engines, with a warning when a LoRA was made for the other model family
 - Live preview of every step (latent projection, no extra time)
 - Gallery: upscale with a detail pass or upscaler-only ×2, reuse prompt/settings/seed, info, ← / → to browse
+- Zoomable image (pinch, ⌘+ / ⌘−, double-click for 100 %, ⌘0 / ⌘9), collapsible inspector sections,
+  hideable prompt and gallery (⌥⌘P / ⌥⌘G)
+- Models load in the background when the app opens (the selected model with its upscaler and face repair,
+  or every image model if you want instant switching) and are freed after 5 minutes idle
 - AI prompt: turn a sentence into tags with any OpenAI-compatible local server (MLX-Serve, LM Studio, ...)
 - PNGs carry A1111-style `parameters` text (readable by other tools) plus the full settings as JSON
 - `waigen-cli` for scripting and benchmarks

@@ -71,19 +71,33 @@ struct JobResult: Sendable {
 
 extension ModelPreset: @unchecked Sendable {}
 
-/// Runs jobs one at a time on a dedicated queue and keeps the models loaded between jobs.
+/// Runs jobs one at a time on a dedicated queue and keeps the models loaded between jobs: the selected
+/// image model with its helpers (upscaler, face detector, face-repair context). With "keep every image
+/// model loaded" (off by default) the other image models stay in memory too, so switching is instant.
+/// `preload` loads them in the background, always after any waiting job.
 final class GenerationService: @unchecked Sendable {
+    static let keepLoadedKey = "keepModelsLoaded"
+    static let preloadKey = "preloadModels"
+    static var keepAllLoaded: Bool { UserDefaults.standard.object(forKey: keepLoadedKey) as? Bool ?? false }
+
     private let queue = DispatchQueue(label: "waigen.engine", qos: .userInitiated)
-    private var mlx: (id: String, engine: WaiSDXL)?
-    private var sdcpp: (id: String, engine: SDCppEngine)?
-    /// stable-diffusion.cpp context with the same SDXL checkpoint, for face repair of MLX images
-    private var detailCtx: (id: String, engine: SDCppEngine)?
+    // everything below is only touched on `queue`
+    private var mlx: [String: WaiSDXL] = [:]
+    private var sdcpp: [String: SDCppEngine] = [:]
+    /// stable-diffusion.cpp contexts with the same SDXL checkpoint, for face repair of MLX images
+    private var detailCtx: [String: SDCppEngine] = [:]
     private var detector: SDCppFaceDetector?
-    private var upscaler: ModelUpscaler?
+    private var upscalers: [URL: ModelUpscaler] = [:]
+    private var preloadSteps: [(name: String, load: () throws -> Void)] = []
+    private var names: [String: String] = [:]   // preset id -> name, for the "in memory" list
+
+    /// Called (on the engine queue) when the set of loaded models or the background loading changes.
+    var onModelsChanged: (@Sendable (_ loaded: [String], _ loading: String?) -> Void)?
 
     private let lock = NSLock()
     private var cancelled = false
     private var activeSDCpp: SDCppEngine?
+    private var waitingJobs = 0
 
     /// Stops any running job and frees every model. Call before the app exits: ggml's Metal backend
     /// asserts at process exit (in a static destructor) that no GPU buffers are still alive, so quitting
@@ -94,11 +108,12 @@ final class GenerationService: @unchecked Sendable {
         let done = DispatchSemaphore(value: 0)
         queue.async {
             self.setActive(nil)
-            self.sdcpp = nil
-            self.detailCtx = nil
+            self.preloadSteps.removeAll()
+            self.sdcpp.removeAll()
+            self.detailCtx.removeAll()
             self.detector = nil
-            self.upscaler = nil
-            self.mlx = nil
+            self.upscalers.removeAll()
+            self.mlx.removeAll()
             done.signal()
         }
         return done.wait(timeout: .now() + timeout) == .success
@@ -127,9 +142,14 @@ final class GenerationService: @unchecked Sendable {
     func run(_ job: GenerationJob, progress: @escaping @Sendable (JobProgress) -> Void) async throws -> JobResult {
         lock.lock()
         cancelled = false
+        waitingJobs += 1
         lock.unlock()
         return try await withCheckedThrowingContinuation { cont in
             queue.async {
+                self.lock.lock()
+                self.waitingJobs -= 1
+                self.lock.unlock()
+                defer { self.schedulePreload() }   // carry on loading the other models afterwards
                 do {
                     let result: JobResult
                     if let up = job.upscale {
@@ -153,17 +173,129 @@ final class GenerationService: @unchecked Sendable {
 
     private func path(_ job: GenerationJob, _ rel: String?) -> URL { job.modelsRoot.appendingPathComponent(rel ?? "") }
 
+    // MARK: model cache
+
+    /// Unless every model may stay loaded, drop the ones `keep` doesn't need.
+    private func makeRoom(keeping id: String) {
+        guard !Self.keepAllLoaded else { return }
+        mlx = mlx.filter { $0.key == id }
+        sdcpp = sdcpp.filter { $0.key == id }
+        detailCtx = detailCtx.filter { $0.key == id }
+        Memory.clearCache()
+    }
+
+    private func loadMLX(_ p: ModelPreset, _ root: URL) throws -> WaiSDXL {
+        if let e = mlx[p.id] { return e }
+        makeRoom(keeping: p.id)
+        let e = try WaiSDXL(checkpoint: root.appendingPathComponent(p.checkpoint ?? ""))
+        mlx[p.id] = e
+        names[p.id] = p.name
+        Memory.clearCache()
+        reportModels()
+        return e
+    }
+
+    private func loadSDCpp(_ p: ModelPreset, _ root: URL) throws -> SDCppEngine {
+        if let e = sdcpp[p.id] { return e }
+        makeRoom(keeping: p.id)
+        func file(_ rel: String?) -> URL { root.appendingPathComponent(rel ?? "") }
+        let e = try SDCppEngine(diffusionModel: file(p.diffusionModel), llm: file(p.llm), vae: file(p.vae))
+        // its VAE runs in MLX (sd.cpp's Metal VAE takes minutes at hi-res sizes); sd.cpp's own is the fallback
+        if let vae = try? QwenImageVAE(url: file(p.vae)) { e.externalVAE = MLXVAEBridge(vae) }
+        sdcpp[p.id] = e
+        names[p.id] = p.name
+        reportModels()
+        return e
+    }
+
+    private func loadDetail(_ p: ModelPreset, _ root: URL) throws -> SDCppEngine {
+        if let e = detailCtx[p.id] { return e }
+        let e = try SDCppEngine(checkpoint: root.appendingPathComponent(p.checkpoint ?? ""))
+        detailCtx[p.id] = e
+        reportModels()
+        return e
+    }
+
+    private func loadDetector(_ root: URL) throws -> SDCppFaceDetector {
+        if let d = detector { return d }
+        let d = try SDCppFaceDetector(model: root.appendingPathComponent("detectors/face_yolov8m.safetensors"))
+        detector = d
+        return d
+    }
+
+    private func reportModels(loading: String? = nil) {
+        let loaded = Set(mlx.keys).union(sdcpp.keys).compactMap { names[$0] }.sorted()
+        onModelsChanged?(loaded, loading)
+    }
+
+    /// Load these models in the background, one step at a time, each step queued behind any job that
+    /// is waiting, so generating never waits for more than the step already running.
+    func preload(_ presets: [ModelPreset], modelsRoot root: URL, faceRepair: Bool, upscaler: URL?) {
+        queue.async {
+            var steps: [(String, () throws -> Void)] = []
+            var sharedAdded = false
+            for p in presets where p.missingFiles(in: root).isEmpty {
+                switch p.engine {
+                case .mlx:
+                    steps.append((p.name, { _ = try self.loadMLX(p, root) }))
+                    if faceRepair { steps.append((p.name + " face repair", { _ = try self.loadDetail(p, root) })) }
+                case .sdcpp:
+                    steps.append((p.name, { _ = try self.loadSDCpp(p, root) }))
+                }
+                if !sharedAdded {   // right after the first model: what its first image needs
+                    sharedAdded = true
+                    if faceRepair { steps.append(("face detector", { _ = try self.loadDetector(root) })) }
+                    if let upscaler {
+                        steps.append(("upscaler", {
+                            if self.upscalers[upscaler] == nil { self.upscalers[upscaler] = try ModelUpscaler(url: upscaler) }
+                        }))
+                    }
+                }
+            }
+            self.preloadSteps = steps.map { (name: $0.0, load: $0.1) }
+            self.schedulePreload()
+        }
+    }
+
+    /// Queue the next preload step (on the engine queue, behind anything already queued).
+    private func schedulePreload() {
+        queue.async {
+            self.lock.lock()
+            let busy = self.waitingJobs > 0
+            self.lock.unlock()
+            guard !busy, !self.preloadSteps.isEmpty else {
+                if self.preloadSteps.isEmpty { self.reportModels() }
+                return
+            }
+            let step = self.preloadSteps.removeFirst()
+            self.reportModels(loading: step.name)
+            do { try step.load() } catch {
+                FileHandle.standardError.write(Data("preload \(step.name): \(error.localizedDescription)\n".utf8))
+            }
+            self.schedulePreload()
+        }
+    }
+
+    /// Free every model now (they load again when needed).
+    func unloadAll() {
+        queue.async {
+            self.preloadSteps.removeAll()
+            self.mlx.removeAll()
+            self.sdcpp.removeAll()
+            self.detailCtx.removeAll()
+            self.detector = nil
+            self.upscalers.removeAll()
+            Memory.clearCache()
+            self.reportModels()
+        }
+    }
+
+    // MARK: engines for a job
+
     private func mlxEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiSDXL {
         let p = job.preset
-        if mlx?.id != p.id {
-            sdcpp = nil
-            mlx = nil
-            if detailCtx?.id != p.id { detailCtx = nil }
-            Memory.clearCache()
-            progress(.loadingModel(p.name))
-            mlx = (p.id, try WaiSDXL(checkpoint: path(job, p.checkpoint)))
-        }
-        guard let engine = mlx?.engine else { throw CancellationError() }
+        if mlx[p.id] == nil { progress(.loadingModel(p.name)) }
+        let engine = try loadMLX(p, job.modelsRoot)
         let report = try engine.setLoRAs(job.loras.map { LoRASpec(url: $0.url, strength: Float($0.strength)) })
         if !report.unmatched.isEmpty || report.unsupported > 0 {
             FileHandle.standardError.write(Data(
@@ -174,19 +306,8 @@ final class GenerationService: @unchecked Sendable {
 
     private func sdcppEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> SDCppEngine {
         let p = job.preset
-        if sdcpp?.id != p.id {
-            mlx = nil
-            sdcpp = nil
-            detailCtx = nil
-            Memory.clearCache()
-            progress(.loadingModel(p.name))
-            let engine = try SDCppEngine(diffusionModel: path(job, p.diffusionModel), llm: path(job, p.llm), vae: path(job, p.vae))
-            // its VAE runs in MLX (sd.cpp's Metal VAE takes minutes at hi-res sizes); sd.cpp's own is the fallback
-            if let vae = try? QwenImageVAE(url: path(job, p.vae)) { engine.externalVAE = MLXVAEBridge(vae) }
-            sdcpp = (p.id, engine)
-        }
-        guard let engine = sdcpp?.engine else { throw CancellationError() }
-        return engine
+        if sdcpp[p.id] == nil { progress(.loadingModel(p.name)) }
+        return try loadSDCpp(p, job.modelsRoot)
     }
 
     /// Engine that repaints faces: the sd.cpp context itself, or (for MLX models) an sd.cpp
@@ -197,19 +318,15 @@ final class GenerationService: @unchecked Sendable {
         case .sdcpp:
             return try sdcppEngine(job, progress)
         case .mlx:
-            if detailCtx?.id != p.id {
-                detailCtx = nil
-                progress(.loadingFaceRepair)
-                detailCtx = (p.id, try SDCppEngine(checkpoint: path(job, p.checkpoint)))
-            }
-            guard let e = detailCtx?.engine else { throw CancellationError() }
-            return e
+            if detailCtx[p.id] == nil { progress(.loadingFaceRepair) }
+            return try loadDetail(p, job.modelsRoot)
         }
     }
 
     private func modelUpscaler(_ url: URL) throws -> ModelUpscaler {
-        if upscaler?.url != url { upscaler = try ModelUpscaler(url: url) }
-        guard let up = upscaler else { throw CancellationError() }
+        if let up = upscalers[url] { return up }
+        let up = try ModelUpscaler(url: url)
+        upscalers[url] = up
         return up
     }
 
@@ -428,8 +545,7 @@ final class GenerationService: @unchecked Sendable {
         guard let fr = job.faceRepair else { return (image, nil) }
         if isCancelled { throw CancellationError() }
         let tf = Date()
-        if detector == nil { detector = try SDCppFaceDetector(model: path(job, "detectors/face_yolov8m.safetensors")) }
-        guard let detector else { throw CancellationError() }
+        let detector = try loadDetector(job.modelsRoot)
         let engine = try repairEngine(job, progress)
         setActive(engine)
         defer { setActive(nil) }

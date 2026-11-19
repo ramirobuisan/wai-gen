@@ -2,16 +2,44 @@ import SwiftUI
 
 struct CanvasView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("showPromptPanel") private var showPrompt = true
+    @AppStorage("showGallery") private var showGallery = true
 
     var body: some View {
         VStack(spacing: 0) {
             ImageStage()
-            Divider()
-            PromptPanel()
-                .padding(12)
-            Divider()
-            GalleryStrip()
-                .frame(height: 92)
+                .overlay(alignment: .bottomTrailing) {
+                    // hide / show the prompt and the gallery (also View ▸ ⌥⌘P / ⌥⌘G)
+                    let visible = showPrompt || showGallery
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showPrompt = !visible
+                            showGallery = !visible
+                        }
+                    } label: {
+                        Label(visible ? "Hide Prompt and Gallery" : "Show Prompt and Gallery",
+                              systemImage: visible ? "chevron.down" : "chevron.up")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 22, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(4)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(10)
+                    .help(visible ? "Hide the prompt and gallery" : "Show the prompt and gallery")
+                }
+            if showPrompt {
+                Divider()
+                PromptPanel()
+                    .padding(12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if showGallery {
+                Divider()
+                GalleryStrip()
+                    .frame(height: 92)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
     }
 }
@@ -40,14 +68,8 @@ struct ImageStage: View {
                             .padding(20)
                     }
             } else if let image = model.displayedImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(12)
-                    .onDrag {
-                        if let url = model.selection?.url { return NSItemProvider(contentsOf: url) ?? NSItemProvider() }
-                        return NSItemProvider()
-                    }
+                // pinch / ⌘+ ⌘- to zoom, double-click for 100 %, drag out when fitted
+                ZoomableImage(image: image, fileURL: model.selection?.url, zoom: model.zoom)
             } else if !model.isBusy {
                 ContentUnavailableView {
                     Label("Pick a character", systemImage: "person.crop.rectangle.stack")

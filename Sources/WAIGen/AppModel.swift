@@ -76,8 +76,57 @@ final class AppModel {
     }
 
     @ObservationIgnored private let service = GenerationService()
+    /// zoom commands for the image stage (View menu)
+    @ObservationIgnored let zoom = StageZoom()
     @ObservationIgnored private var stepStart: Date?
     @ObservationIgnored private var started = false
+
+    // MARK: models in memory
+
+    /// Names of the models in memory, and the one loading in the background (for the inspector).
+    var loadedModels: [String] = []
+    var backgroundLoading: String?
+    @ObservationIgnored private var idleTimer: Timer?
+    @ObservationIgnored private var unloadedForIdle = false
+
+    static let preloadKey = GenerationService.preloadKey
+    static let idleMinutesKey = "unloadAfterIdleMinutes"
+    /// Free the models after this many minutes without generating (0 = never).
+    static var idleMinutes: Int { UserDefaults.standard.object(forKey: idleMinutesKey) as? Int ?? 5 }
+    static var preloadAtLaunch: Bool { UserDefaults.standard.object(forKey: preloadKey) as? Bool ?? true }
+
+    /// Load in the background what the next image needs: the selected image model, the upscaler and face
+    /// repair (and the other image models too if "keep every image model loaded" is on). Generating
+    /// always goes before the next load step.
+    func preloadModels() {
+        unloadedForIdle = false
+        let others = ModelCatalog.presets.filter { $0.id != preset.id }
+        let presets = GenerationService.keepAllLoaded ? [preset] + others : [preset]
+        let upscaler = settings.hiresUpscaler.isEmpty ? nil : Self.upscalerFolder.appendingPathComponent(settings.hiresUpscaler)
+        service.preload(presets, modelsRoot: AppPaths.models,
+                        faceRepair: settings.faceRepair && FileManager.default.fileExists(atPath: AppPaths.faceDetector.path),
+                        upscaler: upscaler.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil })
+        scheduleIdleUnload()
+    }
+
+    func unloadModels() {
+        idleTimer?.invalidate()
+        service.unloadAll()
+    }
+
+    /// (Re)start the countdown that frees the models while nothing is generating.
+    private func scheduleIdleUnload() {
+        idleTimer?.invalidate()
+        let minutes = Self.idleMinutes
+        guard minutes > 0 else { return }
+        idleTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.isBusy else { return }
+                self.service.unloadAll()
+                self.unloadedForIdle = true
+            }
+        }
+    }
 
     var preset: ModelPreset { ModelCatalog.preset(settings.modelID) }
     var isBusy: Bool { running != nil }
@@ -87,6 +136,22 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        if let upgraded = ModelCatalog.legacyNegatives[settings.negative] { settings.negative = upgraded }
+        service.onModelsChanged = { loaded, loading in
+            Task { @MainActor in
+                self.loadedModels = loaded
+                self.backgroundLoading = loading
+            }
+        }
+        // back to the app after the models were freed for being idle: load them again
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.unloadedForIdle, Self.preloadAtLaunch else { return }
+                self.preloadModels()
+            }
+        }
+        if Self.preloadAtLaunch { preloadModels() } else { scheduleIdleUnload() }
         // ← / → move through the gallery, unless a text field or the prompt editor is being edited
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let arrows: [UInt16: Int] = [123: -1, 124: 1]
@@ -132,6 +197,7 @@ final class AppModel {
         guard p.id != settings.modelID else { return }
         settings.apply(p)
         characterList = p.characterList
+        if Self.preloadAtLaunch { preloadModels() }   // start loading it (and its face repair) right away
     }
 
     func resetToPreset() { settings.apply(preset) }
@@ -216,6 +282,7 @@ final class AppModel {
             pending.append(job)
         }
         processNext()
+        if unloadedForIdle, Self.preloadAtLaunch { preloadModels() }   // the rest load after this job
     }
 
     /// False only when the LoRA's metadata says it was trained for a different model family.
@@ -298,7 +365,11 @@ final class AppModel {
     func clearQueue() { pending.removeAll() }
 
     private func processNext() {
-        guard running == nil, !pending.isEmpty else { return }
+        guard running == nil, !pending.isEmpty else {
+            if running == nil { scheduleIdleUnload() }   // queue empty: start the idle countdown
+            return
+        }
+        idleTimer?.invalidate()
         let job = pending.removeFirst()
         running = job
         progress = ProgressInfo(title: "Starting…", fraction: nil)
