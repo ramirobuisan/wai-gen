@@ -31,7 +31,7 @@ struct InspectorView: View {
                     } else {
                         HStack {
                             Label(model.remoteStatus ?? "Not connected to \(model.generatorName)", systemImage: "network.slash")
-                                .foregroundStyle(.orange).lineLimit(2)
+                                .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                             Spacer()
                             Button("Retry") { model.connectGenerator() }
                         }

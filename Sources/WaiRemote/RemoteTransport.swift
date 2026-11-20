@@ -22,26 +22,55 @@ final class WSChannel: @unchecked Sendable {
 
     init(_ connection: NWConnection) { self.connection = connection }
 
-    /// Starts the connection and waits until it's ready (or fails, or `timeout` passes).
-    func open(timeout: TimeInterval = 10) async throws {
+    static let localNetworkHint = "macOS is blocking WAI Gen from the local network: turn WAI Gen on in System Settings → "
+        + "Privacy & Security → Local Network (or use the other Mac's Tailscale address)."
+
+    /// Starts the connection and waits until it's ready (or fails, or `timeout` passes). A connection that is
+    /// "waiting" (e.g. while macOS asks for Local Network access the first time) is given until the timeout.
+    func open(timeout: TimeInterval = 15) async throws {
         let once = Once()
+        let lastWait = LockedBox<NWError?>(nil)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            func finish(_ r: Result<Void, Error>) { if once.claim() { cont.resume(with: r) } }
+            let connection = connection
+            func finish(_ r: Result<Void, Error>) {
+                guard once.claim() else { return }
+                if case .failure = r { connection.cancel() }   // or it keeps retrying in the background
+                cont.resume(with: r)
+            }
             connection.stateUpdateHandler = { state in
                 if ProcessInfo.processInfo.environment["WAIGEN_REMOTE_DEBUG"] != nil {
-                    FileHandle.standardError.write(Data("[channel \(self.connection.endpoint)] \(state)\n".utf8))
+                    FileHandle.standardError.write(Data("[channel \(connection.endpoint)] \(state)\n".utf8))
                 }
                 switch state {
                 case .ready: finish(.success(()))
-                case .failed(let e): finish(.failure(RemoteError.connection(e.localizedDescription)))
-                case .waiting(let e): finish(.failure(RemoteError.connection(e.localizedDescription)))
+                case .failed(let e): finish(.failure(Self.describe(e, connection)))
+                case .waiting(let e):
+                    // keep waiting: macOS holds the first connection while it asks for Local Network access
+                    // (and reports it as "denied" until the user answers), or the network may come back
+                    lastWait.value = e
                 case .cancelled: finish(.failure(RemoteError.connection("closed")))
                 default: break
                 }
             }
             connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + timeout) { finish(.failure(RemoteError.connection("timed out"))) }
+            queue.asyncAfter(deadline: .now() + timeout) {
+                finish(.failure(lastWait.value.map { Self.describe($0, connection) } ?? RemoteError.connection(
+                    "no answer. Check that WAI Gen is open on the other Mac with “Let other Macs generate on this Mac” on, "
+                    + "and that both Macs are on the same network or Tailscale.")))
+            }
         }
+    }
+
+    /// An error with a hint when it's the Local Network permission (macOS reports it as "Network is down" /
+    /// "No route to host" for addresses on the local network).
+    static func describe(_ e: NWError, _ c: NWConnection) -> RemoteError {
+        if #available(macOS 14.0, *), c.currentPath?.unsatisfiedReason == .localNetworkDenied {
+            return .connection(localNetworkHint)
+        }
+        if case .posix(let code) = e, code == .ENETDOWN || code == .EHOSTUNREACH || code == .ENETUNREACH {
+            return .connection("\(e.localizedDescription). " + localNetworkHint)
+        }
+        return .connection(e.localizedDescription)
     }
 
     func close() { connection.cancel() }
@@ -91,6 +120,16 @@ final class WSChannel: @unchecked Sendable {
                 c.resume(returning: (data ?? Data(), meta.opcode))
             }
         }
+    }
+}
+
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v: T
+    init(_ v: T) { self.v = v }
+    var value: T {
+        get { lock.lock(); defer { lock.unlock() }; return v }
+        set { lock.lock(); v = newValue; lock.unlock() }
     }
 }
 

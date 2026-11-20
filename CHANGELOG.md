@@ -2,6 +2,9 @@
 
 ## 2026-11-20 (early morning)
 
+- Generate on another Mac: the laptop now waits (15 s) while macOS asks for Local Network access instead of
+  failing at once with "Network is down", and a blocked or unreachable Mac gets an error that says what to do
+  (with a button for Local Network settings).
 - Generate on another Mac: Settings → Share this Mac turns a Mac into a generator (WebSocket server, Bonjour,
   pairing code, local-network and Tailscale addresses only); Settings → Generator makes a laptop use it (models,
   LoRAs and upscalers listed from it, live preview, images saved locally). Per-job cancel in the engine queue so

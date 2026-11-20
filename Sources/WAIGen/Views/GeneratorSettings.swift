@@ -5,6 +5,7 @@ import WaiRemote
 /// address), and share this Mac as a generator for others.
 struct GeneratorSettingsSections: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openURL) private var openURL
     @State private var found: [RemoteEndpoint] = []
     @State private var browser: RemoteBrowser?
     /// "local", "service:<name>" or "address"
@@ -31,6 +32,15 @@ struct GeneratorSettingsSections: View {
                         .disabled(code.isEmpty || (choice == "address" && RemoteEndpoint.address(address) == nil))
                     Spacer()
                     connectionStatus
+                }
+                if isCurrentChoice, model.remoteInfo == nil, let s = model.remoteStatus, !s.hasPrefix("Connecting") {
+                    Text(s).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    if s.contains("Local Network") {
+                        Button("Open Local Network Settings") {
+                            openURL(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!)
+                        }
+                    }
                 }
             } else if model.isRemote {
                 Button("Generate on this Mac again") { model.setGenerator(nil) }
@@ -92,9 +102,8 @@ struct GeneratorSettingsSections: View {
                 Label("Connected: \(info.presets.count) model\(info.presets.count == 1 ? "" : "s"), \(info.loras.count) LoRA\(info.loras.count == 1 ? "" : "s")",
                       systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green).font(.caption)
-            } else if let s = model.remoteStatus {
-                Text(s).font(.caption).foregroundStyle(s.hasPrefix("Connecting") ? Color.secondary : Color.orange)
-                    .lineLimit(2)
+            } else if let s = model.remoteStatus, s.hasPrefix("Connecting") {
+                Text(s).font(.caption).foregroundStyle(.secondary)
             }
         }
     }

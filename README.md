@@ -102,6 +102,10 @@ WAI Gen on a laptop can use another Mac's GPU and models, e.g. a MacBook Air gen
 The laptop then shows the other Mac's models, LoRAs and upscalers, the live preview streams back, and the images
 are saved in the laptop's gallery with their settings. The laptop needs no model files (and doesn't load any).
 
+If the laptop says "Network is down" or "No route to host", macOS is blocking WAI Gen from the local network: allow
+it when macOS asks, or turn it on in **System Settings → Privacy & Security → Local Network** (the error has a
+button for it) and reopen WAI Gen. Every new build asks again. The Tailscale address doesn't need that permission.
+
 Protocol: one WebSocket per job (`Sources/WaiRemote`, Network.framework, Bonjour `_waigen._tcp`). The sharing Mac
 accepts only local-network and Tailscale addresses, only after the pairing code (wrong codes are slowed down), and
 only references to files in its own models folder. Over Wi-Fi the traffic isn't encrypted; over Tailscale it is.
