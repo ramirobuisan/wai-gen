@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-11-20)
 
 - Hover over a style's or a character's thumbnail to see it bigger: after a moment a card with the image, the name and
   its Danbooru count appears over the canvas beside the sidebar (moving to another thumbnail swaps it at once).
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.3.1" button in the
+toolbar). From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time,
+allow it in **System Settings → Privacy & Security → Open Anyway**.
 
 ## 0.3.0 (2026-11-20)
 
