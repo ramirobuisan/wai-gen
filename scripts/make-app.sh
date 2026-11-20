@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT=${0:A:h:h}
 PRODUCTS="$ROOT/.build-xcode/Build/Products/Release"
 APP="$ROOT/build/WAI Gen.app"
-VERSION=${WAIGEN_VERSION:-0.1}
+VERSION=${WAIGEN_VERSION:-$(cat "$ROOT/VERSION")}
 
 cd "$ROOT"
 echo "Building (Release)…"

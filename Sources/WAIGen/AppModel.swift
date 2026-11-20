@@ -30,6 +30,8 @@ final class AppModel {
     }
     let characters = CharacterStore()
     @ObservationIgnored let tags = TagIndex()
+    /// new versions from GitHub releases
+    let updater = Updater()
     var tagsReady = false
 
     /// Character list shown in the sidebar (defaults to the selected model's list).
@@ -300,6 +302,7 @@ final class AppModel {
             }
         }
         if UserDefaults.standard.bool(forKey: Self.shareKey) { setSharing(true) }
+        updater.startAutomaticChecks()
         if isRemote { connectGenerator() }
         // back to the app after the models were freed for being idle: load them again
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (2026-11-20)
+
+The first release on GitHub. From this version on, WAI Gen updates itself from the releases here.
+
+- Updates: **Settings → Updates** and **WAI Gen → Check for Updates…**. Stable channel (releases) or Beta
+  (pre-releases too); checks once a day when automatic checks are on and shows an "Update to x.y.z" button in the
+  toolbar. The download's size and SHA-256 must match GitHub's, it must be WAI Gen at that version with an intact
+  signature; then it replaces the app in place and reopens it. Models, images and settings stay.
+- Generating on another Mac now waits while macOS asks for Local Network access and explains a blocked or
+  unreachable Mac (with a button for the Local Network settings).
+- Everything in the sections below: WAI v16 and WAI-ANIMA in Swift + MLX, hi-res fix, face repair, LoRAs,
+  upscalers, live preview, step cache, and generating on another Mac.
+
+Install: unzip, move **WAI Gen.app** to Applications, and the first time allow it in **System Settings → Privacy &
+Security → Open Anyway** (the app isn't notarized). Later updates install from the app without that step.
+
 ## 2026-11-20 (early morning)
 
 - Generate on another Mac: the laptop now waits (15 s) while macOS asks for Local Network access instead of

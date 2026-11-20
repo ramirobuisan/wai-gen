@@ -24,6 +24,9 @@ struct WAIGenApp: App {
         }
         .defaultSize(width: 1440, height: 920)
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesButton(updater: model.updater)
+            }
             CommandGroup(after: .newItem) {
                 Button("Generate") { model.generate() }
                     .keyboardShortcut(.return, modifiers: .command)
@@ -102,6 +105,7 @@ struct WAIGenApp: App {
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         @Bindable var model = model
@@ -119,6 +123,12 @@ struct ContentView: View {
         .navigationSubtitle(model.preset.name)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                if let update = model.updater.available {
+                    Button { openSettings() } label: {
+                        Label("Update to \(update.version)", systemImage: "arrow.down.circle")
+                    }
+                    .help("WAI Gen \(update.version) is available: install it in Settings")
+                }
                 if model.queueCount > 0 {
                     Menu {
                         if let r = model.running { Text("Now: seed \(r.seed)") }
@@ -184,6 +194,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            UpdateSettingsSection()
             GeneratorSettingsSections()
             Section("AI prompt") {
                 TextField("Server", text: $aiURL, prompt: Text(AIPrompt.defaultURL))

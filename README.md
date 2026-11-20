@@ -60,6 +60,23 @@ and [mlx-swift-realesrgan](https://github.com/ramirobuisan/mlx-swift-realesrgan)
 
 More numbers, including what was tried and dropped: [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 
+## Install and update
+
+Download `WAI-Gen.zip` from [Releases](https://github.com/ramirobuisan/wai-gen/releases), unzip it and move
+**WAI Gen.app** to Applications (or ~/Applications). The app isn't notarized: the first time, macOS refuses to open
+it; go to **System Settings → Privacy & Security** and press **Open Anyway** (once).
+
+After that it updates itself from this repository's releases: **Settings → Updates** (or **WAI Gen → Check for
+Updates…**). The **Stable** channel follows releases; **Beta** also takes pre-releases. With automatic checks on
+(the default) it looks once a day and shows an **Update to x.y.z** button in the toolbar. Installing downloads the
+release's `WAI-Gen.zip`, checks its size and SHA-256 against GitHub's, that it is WAI Gen at that version and that
+its signature is intact, swaps it in place and reopens the app. Models, images and settings live outside the app
+and stay. It waits for queued images (and other Macs' jobs) to finish first.
+
+Releasing (maintainers): bump `VERSION`, add a `## <version>` section at the top of `CHANGELOG.md` (it becomes
+the release notes), commit and push, then `scripts/release.sh` (or `scripts/release.sh --beta` for a
+pre-release). It builds, zips, tags `v<version>` and creates the GitHub release with `gh`.
+
 ## Build
 
 Requirements: Apple silicon, macOS 14+, Xcode 16+.
