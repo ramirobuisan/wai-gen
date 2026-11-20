@@ -40,6 +40,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <key>NSLocalNetworkUsageDescription</key><string>WAI Gen finds other Macs running it on your network to generate images there, and lets them generate on this Mac when you turn that on.</string>
+    <key>NSBonjourServices</key><array><string>_waigen._tcp</string></array>
 </dict>
 </plist>
 PLIST

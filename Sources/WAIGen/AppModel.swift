@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import Observation
 import WaiMLX
+import WaiRemote
 
 struct ProgressInfo: Equatable {
     var title: String
@@ -53,6 +54,10 @@ final class AppModel {
     nonisolated static var upscalerFolder: URL { AppPaths.models.appendingPathComponent("upscale_models", isDirectory: true) }
 
     func refreshUpscalers() {
+        if let info = remoteInfo, isRemote {   // the generator's upscalers
+            upscalerFiles = info.upscalers.map { ($0.name, $0.scale) }
+            return
+        }
         Task.detached(priority: .utility) {
             let folder = AppModel.upscalerFolder
             let names = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
@@ -72,6 +77,10 @@ final class AppModel {
     }
 
     func refreshLoRAs() {
+        if let info = remoteInfo, isRemote {   // the generator's LoRAs
+            loraFiles = info.loras.map { LoRAFile(relativePath: $0.relativePath, baseModel: $0.baseModel, triggerTags: $0.triggerTags) }
+            return
+        }
         Task.detached(priority: .utility) {
             let files = LoRACatalog.scan()
             await MainActor.run { self.loraFiles = files }
@@ -84,6 +93,138 @@ final class AppModel {
     }
 
     @ObservationIgnored private let service = GenerationService()
+    /// runs other Macs' jobs here when sharing is on
+    @ObservationIgnored private lazy var generatorHost = GeneratorHost(service: service)
+    @ObservationIgnored private var server: RemoteServer?
+    @ObservationIgnored private var sharingActivity: NSObjectProtocol?
+
+    // MARK: generating on another Mac
+
+    static let generatorKey = "generator.v1"
+    static let shareKey = "shareGenerator"
+    static let shareCodeKey = "shareCode"
+
+    /// The Mac that generates when it isn't this one (Settings → Generate on).
+    struct GeneratorChoice: Codable, Equatable {
+        var endpoint: RemoteEndpoint
+        var code: String
+    }
+    var generator: GeneratorChoice? = {
+        guard let d = UserDefaults.standard.data(forKey: AppModel.generatorKey) else { return nil }
+        return try? JSONDecoder().decode(GeneratorChoice.self, from: d)
+    }()
+    /// what the chosen generator offers (nil until connected)
+    var remoteInfo: RemoteInfo?
+    var remoteStatus: String?
+    var isRemote: Bool { generator != nil }
+    @ObservationIgnored private var remoteTask: Task<Void, Never>?
+    /// "Sharing as … on port …" or an error, for Settings
+    var sharingStatus: String?
+    /// a job for another Mac is running here
+    var servingClient: String?
+
+    /// Generate on `choice` (nil = this Mac). Connects to check the pairing code and read its models.
+    func setGenerator(_ choice: GeneratorChoice?) {
+        generator = choice
+        if let choice, let d = try? JSONEncoder().encode(choice) {
+            UserDefaults.standard.set(d, forKey: Self.generatorKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.generatorKey)
+        }
+        remoteInfo = nil
+        remoteStatus = nil
+        if choice != nil {
+            service.unloadAll()   // this Mac's own models aren't needed while another Mac generates
+            connectGenerator()
+        } else {
+            refreshLoRAs()
+            refreshUpscalers()
+            if Self.preloadAtLaunch { preloadModels() }
+        }
+    }
+
+    /// (Re)reads the generator's models, LoRAs and upscalers.
+    func connectGenerator() {
+        guard let g = generator else { return }
+        remoteStatus = "Connecting to \(g.endpoint.name)…"
+        Task {
+            do {
+                let info = try await RemoteClient(endpoint: g.endpoint, code: g.code).info()
+                guard generator == g else { return }
+                remoteInfo = info
+                remoteStatus = nil
+                refreshLoRAs()
+                refreshUpscalers()
+            } catch {
+                guard generator == g else { return }
+                remoteInfo = nil
+                remoteStatus = error.localizedDescription
+            }
+        }
+    }
+
+    var generatorName: String { remoteInfo?.name ?? generator?.endpoint.name ?? "this Mac" }
+
+    /// Files a preset needs that the generating Mac doesn't have.
+    func missingFiles(_ p: ModelPreset) -> [String] {
+        guard isRemote else { return p.missingFiles(in: AppPaths.models) }
+        guard let info = remoteInfo else { return ["Not connected to \(generatorName)\(remoteStatus.map { ": \($0)" } ?? "")"] }
+        return info.presets.contains(p.id) ? [] : ["\(p.name) isn't installed on \(info.name)"]
+    }
+
+    var faceDetectorAvailable: Bool {
+        isRemote ? remoteInfo?.faceDetector == true : FileManager.default.fileExists(atPath: AppPaths.faceDetector.path)
+    }
+
+    func loraAvailable(_ relativePath: String) -> Bool {
+        isRemote ? remoteInfo?.loras.contains { $0.relativePath == relativePath } == true
+            : FileManager.default.fileExists(atPath: LoRACatalog.folder.appendingPathComponent(relativePath).path)
+    }
+
+    func upscalerAvailable(_ name: String) -> Bool {
+        isRemote ? remoteInfo?.upscalers.contains { $0.name == name } == true
+            : FileManager.default.fileExists(atPath: Self.upscalerFolder.appendingPathComponent(name).path)
+    }
+
+    // MARK: sharing this Mac
+
+    static var shareCode: String {
+        if let c = UserDefaults.standard.string(forKey: shareCodeKey), !c.isEmpty { return c }
+        let c = RemoteServer.newCode()
+        UserDefaults.standard.set(c, forKey: shareCodeKey)
+        return c
+    }
+
+    /// Lets other Macs generate on this one (or stops it).
+    func setSharing(_ on: Bool, newCode: Bool = false) {
+        UserDefaults.standard.set(on, forKey: Self.shareKey)
+        if newCode { UserDefaults.standard.set(RemoteServer.newCode(), forKey: Self.shareCodeKey) }
+        server?.stop()
+        server = nil
+        if let a = sharingActivity { ProcessInfo.processInfo.endActivity(a) }
+        sharingActivity = nil
+        guard on else {
+            sharingStatus = nil
+            return
+        }
+        let s = RemoteServer(handler: generatorHost, code: Self.shareCode, name: Host.current().localizedName ?? "WAI Gen")
+        s.onStatus = { status in Task { @MainActor in self.sharingStatus = status } }
+        s.onActivity = { client, running in
+            Task { @MainActor in
+                self.servingClient = running ? client : nil
+                if running { self.idleTimer?.invalidate() } else if !self.isBusy { self.scheduleIdleUnload() }
+            }
+        }
+        do {
+            try s.start()
+            server = s
+            // keep answering while the app is in the background (no App Nap)
+            sharingActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Generating for other Macs")
+        } catch {
+            sharingStatus = "failed: \(error.localizedDescription)"
+        }
+    }
     /// zoom commands for the image stage (View menu)
     @ObservationIgnored let zoom = StageZoom()
     @ObservationIgnored private var stepStart: Date?
@@ -107,6 +248,7 @@ final class AppModel {
     /// repair (and the other image models too if "keep every image model loaded" is on). Generating
     /// always goes before the next load step.
     func preloadModels() {
+        guard !isRemote else { return }
         unloadedForIdle = false
         let others = ModelCatalog.presets.filter { $0.id != preset.id }
         let presets = GenerationService.keepAllLoaded ? [preset] + others : [preset]
@@ -139,7 +281,7 @@ final class AppModel {
     var preset: ModelPreset { ModelCatalog.preset(settings.modelID) }
     var isBusy: Bool { running != nil }
     var queueCount: Int { pending.count + (running == nil ? 0 : 1) }
-    var missingModelFiles: [String] { preset.missingFiles(in: AppPaths.models) }
+    var missingModelFiles: [String] { missingFiles(preset) }
 
     func start() {
         guard !started else { return }
@@ -150,12 +292,15 @@ final class AppModel {
             if settings.hiresSteps == 20 { settings.hiresSteps = preset.defaults.hiresSteps }
             UserDefaults.standard.set(2, forKey: "settingsRevision")
         }
-        service.onModelsChanged = { loaded, loading in
+        service.onModelsChanged = { [generatorHost] loaded, loading in
+            generatorHost.setLoaded(loaded)
             Task { @MainActor in
                 self.loadedModels = loaded
                 self.backgroundLoading = loading
             }
         }
+        if UserDefaults.standard.bool(forKey: Self.shareKey) { setSharing(true) }
+        if isRemote { connectGenerator() }
         // back to the app after the models were freed for being idle: load them again
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) {
             [weak self] _ in
@@ -244,10 +389,15 @@ final class AppModel {
     func generate() {
         let missing = missingModelFiles
         guard missing.isEmpty else {
-            errorMessage = "\(preset.name) needs files that aren't in \(AppPaths.models.path):\n" + missing.joined(separator: "\n")
+            errorMessage = isRemote ? missing.joined(separator: "\n")
+                : "\(preset.name) needs files that aren't in \(AppPaths.models.path):\n" + missing.joined(separator: "\n")
             return
         }
-        if settings.faceRepair, !FileManager.default.fileExists(atPath: AppPaths.faceDetector.path) {
+        if settings.faceRepair, isRemote, !faceDetectorAvailable {
+            errorMessage = "Face repair isn't set up on \(generatorName). Turn it off in the inspector."
+            return
+        }
+        if settings.faceRepair, !isRemote, !faceDetectorAvailable {
             errorMessage = "Face repair needs the face detector at \(AppPaths.faceDetector.path). "
                 + "Turn face repair off in the inspector, or convert face_yolov8m.pt with scripts/convert_yolov8_safe.py."
             return
@@ -255,11 +405,9 @@ final class AppModel {
         let s = settings
         // LoRAs made for another model family (e.g. an SDXL LoRA on WAI-ANIMA) are skipped; the inspector flags them
         let activeLoRAs = s.loras.filter { $0.enabled && $0.strength != 0 && loraFits($0.relativePath, preset.engine) }
-        let missingLoRAs = activeLoRAs.filter {
-            !FileManager.default.fileExists(atPath: LoRACatalog.folder.appendingPathComponent($0.relativePath).path)
-        }
+        let missingLoRAs = activeLoRAs.filter { !loraAvailable($0.relativePath) }
         guard missingLoRAs.isEmpty else {
-            errorMessage = "These LoRAs aren't in \(LoRACatalog.folder.path) anymore:\n"
+            errorMessage = "These LoRAs aren't in \(isRemote ? "\(generatorName)'s LoRA folder" : LoRACatalog.folder.path):\n"
                 + missingLoRAs.map(\.relativePath).joined(separator: "\n")
             return
         }
@@ -268,8 +416,8 @@ final class AppModel {
                     strength: $0.strength)
         }
         let upscalerURL: URL? = s.hiresUpscaler.isEmpty ? nil : Self.upscalerFolder.appendingPathComponent(s.hiresUpscaler)
-        if s.hiresEnabled, let u = upscalerURL, !FileManager.default.fileExists(atPath: u.path) {
-            errorMessage = "The hi-res upscaler \(s.hiresUpscaler) isn't in \(Self.upscalerFolder.path). Pick another one in the inspector."
+        if s.hiresEnabled, upscalerURL != nil, !upscalerAvailable(s.hiresUpscaler) {
+            errorMessage = "The hi-res upscaler \(s.hiresUpscaler) isn't on \(generatorName). Pick another one in the inspector."
             return
         }
         let fast = s.fastMode ? preset.defaults.fast : nil   // Fast mode: the preset's quicker sampler / steps
@@ -335,9 +483,10 @@ final class AppModel {
         }
         let r = item.record
         let p = r.flatMap { rec in ModelCatalog.presets.first { $0.id == rec.modelID } } ?? preset
-        let missing = p.missingFiles(in: AppPaths.models)
+        let missing = missingFiles(p)
         if detail, !missing.isEmpty {
-            errorMessage = "\(p.name) needs files that aren't in \(AppPaths.models.path):\n" + missing.joined(separator: "\n")
+            errorMessage = isRemote ? missing.joined(separator: "\n")
+                : "\(p.name) needs files that aren't in \(AppPaths.models.path):\n" + missing.joined(separator: "\n")
             return
         }
         let s = settings
@@ -349,7 +498,7 @@ final class AppModel {
         let loras = (r?.loras ?? []).compactMap { l -> JobLoRA? in
             let url = LoRACatalog.folder.appendingPathComponent(l.path)
             guard loraFits(l.path, p.engine) else { return nil }
-            return FileManager.default.fileExists(atPath: url.path) ? JobLoRA(url: url, relativePath: l.path, strength: l.strength) : nil
+            return loraAvailable(l.path) ? JobLoRA(url: url, relativePath: l.path, strength: l.strength) : nil
         }
         let seed = r?.seed ?? Int64(UInt32.random(in: 0 ... UInt32.max))
         let job = GenerationJob(
@@ -362,7 +511,7 @@ final class AppModel {
             scheduler: r.flatMap { rec in Scheduler.allCases.first { $0.label == rec.scheduler } } ?? s.scheduler,
             seed: seed,
             hires: (min(s.hiresScale, p.defaults.maxHiresScale), s.hiresSteps, s.hiresDenoise),
-            faceRepair: detail && s.faceRepair && FileManager.default.fileExists(atPath: AppPaths.faceDetector.path)
+            faceRepair: detail && s.faceRepair && faceDetectorAvailable
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
             loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview, stepCache: s.stepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail))
@@ -373,7 +522,11 @@ final class AppModel {
     func cancel() {
         guard isBusy else { return }
         progress = ProgressInfo(title: "Stopping…", fraction: nil)
-        service.cancel()
+        if let remoteTask {
+            remoteTask.cancel()
+        } else if let running {
+            service.cancel(jobID: running.id)
+        }
     }
 
     func clearQueue() { pending.removeAll() }
@@ -388,10 +541,30 @@ final class AppModel {
         running = job
         progress = ProgressInfo(title: "Starting…", fraction: nil)
         stepStart = nil
-        Task {
+        let generator = generator
+        let task = Task {
             do {
-                let result = try await service.run(job) { p in
-                    Task { @MainActor in self.update(p) }
+                let result: JobResult
+                if let generator {
+                    progress = ProgressInfo(title: "Sending to \(generatorName)…", fraction: nil)
+                    let r = try await RemoteClient(endpoint: generator.endpoint, code: generator.code).run(
+                        try job.remote(),
+                        progress: { p in Task { @MainActor in self.update(GeneratorHost.local(p)) } },
+                        preview: { jpeg in
+                            Task { @MainActor in
+                                if let img = NSImage(data: jpeg), let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                                    self.update(.preview(cg))
+                                }
+                            }
+                        })
+                    guard let src = CGImageSourceCreateWithData(r.png as CFData, nil),
+                          let cg = CGImageSourceCreateImageAtIndex(src, 0, nil)
+                    else { throw RemoteError.invalid("unreadable image from \(generatorName)") }
+                    result = JobResult(image: cg, seconds: r.seconds, faceRepairSeconds: r.faceRepairSeconds)
+                } else {
+                    result = try await service.run(job) { p in
+                        Task { @MainActor in self.update(p) }
+                    }
                 }
                 finish(job, result)
             } catch is CancellationError {
@@ -399,11 +572,13 @@ final class AppModel {
             } catch {
                 errorMessage = error.localizedDescription
             }
+            remoteTask = nil
             running = nil
             progress = nil
             livePreview = nil
             processNext()
         }
+        if generator != nil { remoteTask = task }
     }
 
     private func update(_ p: JobProgress) {

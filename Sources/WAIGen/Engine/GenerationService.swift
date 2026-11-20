@@ -27,7 +27,7 @@ struct UpscaleRequest: Sendable {
 
 /// A fully resolved request (prompt already assembled, seed fixed).
 struct GenerationJob: Identifiable, Sendable {
-    let id = UUID()
+    var id = UUID()
     let preset: ModelPreset
     let modelsRoot: URL
     let positive: String
@@ -100,7 +100,9 @@ final class GenerationService: @unchecked Sendable {
     var onModelsChanged: (@Sendable (_ loaded: [String], _ loading: String?) -> Void)?
 
     private let lock = NSLock()
-    private var cancelled = false
+    /// jobs asked to stop (by id: this Mac's jobs and other Macs' jobs share the queue)
+    private var cancelledJobs = Set<UUID>()
+    private var currentJob: UUID?
     private var waitingJobs = 0
 
     /// Stops any running job and frees every model (call before the app exits). False if the running job
@@ -119,30 +121,45 @@ final class GenerationService: @unchecked Sendable {
         return done.wait(timeout: .now() + timeout) == .success
     }
 
+    /// Stops the job that is running now.
     func cancel() {
         lock.lock()
-        cancelled = true
+        if let c = currentJob { cancelledJobs.insert(c) }
+        lock.unlock()
+    }
+
+    /// Stops this job (running or still waiting).
+    func cancel(jobID: UUID) {
+        lock.lock()
+        cancelledJobs.insert(jobID)
         lock.unlock()
     }
 
     private var isCancelled: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return cancelled
+        return currentJob.map { cancelledJobs.contains($0) } ?? false
     }
 
     func run(_ job: GenerationJob, progress: @escaping @Sendable (JobProgress) -> Void) async throws -> JobResult {
         lock.lock()
-        cancelled = false
         waitingJobs += 1
         lock.unlock()
         return try await withCheckedThrowingContinuation { cont in
             queue.async {
                 self.lock.lock()
                 self.waitingJobs -= 1
+                self.currentJob = job.id
                 self.lock.unlock()
-                defer { self.schedulePreload() }   // carry on loading the other models afterwards
+                defer {
+                    self.lock.lock()
+                    self.cancelledJobs.remove(job.id)
+                    self.currentJob = nil
+                    self.lock.unlock()
+                    self.schedulePreload()   // carry on loading the other models afterwards
+                }
                 do {
+                    if self.isCancelled { throw CancellationError() }
                     let result: JobResult
                     if let up = job.upscale {
                         result = try self.executeUpscale(job, up, progress: progress)

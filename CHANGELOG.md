@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-20 (early morning)
+
+- Generate on another Mac: Settings → Share this Mac turns a Mac into a generator (WebSocket server, Bonjour,
+  pairing code, local-network and Tailscale addresses only); Settings → Generator makes a laptop use it (models,
+  LoRAs and upscalers listed from it, live preview, images saved locally). Per-job cancel in the engine queue so
+  one Mac's Stop doesn't stop the other's job. CLI: `--remote`, `--code`, `--preset`, `--serve-test`.
+
 ## 2026-11-20 (late night)
 
 - WAI v16: the UNet's deepest-level 3×3 convolutions run as nine matrix multiplies, which use the M5 GPU's neural

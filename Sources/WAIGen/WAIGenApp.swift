@@ -184,6 +184,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            GeneratorSettingsSections()
             Section("AI prompt") {
                 TextField("Server", text: $aiURL, prompt: Text(AIPrompt.defaultURL))
                     .onSubmit { AIPrompt.baseURL = aiURL.isEmpty ? AIPrompt.defaultURL : aiURL }
@@ -221,7 +222,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 600)
+        .frame(width: 600, height: 720)
     }
 
     private func choose(_ done: (URL) -> Void) {

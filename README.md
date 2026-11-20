@@ -34,6 +34,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
   or every image model if you want instant switching) and are freed after 5 minutes idle
 - AI prompt: turn a sentence into tags with any OpenAI-compatible local server (MLX-Serve, LM Studio, ...)
 - PNGs carry A1111-style `parameters` text (readable by other tools) plus the full settings as JSON
+- Generate on another Mac: a laptop without the models uses a Mac that has them, on the same Wi-Fi or over Tailscale
 - `waigen-cli` for scripting and benchmarks
 
 ## Speed (Apple M5 Max)
@@ -87,6 +88,26 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 
 Character data, thumbnails and the tag list are downloaded on first start from Character Select SAA's
 data (or copied from an existing SAA install).
+
+## Generating on another Mac
+
+WAI Gen on a laptop can use another Mac's GPU and models, e.g. a MacBook Air generating on a MacBook Pro:
+
+1. On the Mac with the models: **Settings → Share this Mac → Let other Macs generate on this Mac**. It shows a
+   pairing code and its addresses (Wi-Fi and Tailscale, port 47860). Keep WAI Gen open there.
+2. On the laptop: **Settings → Generator → Generate on**: pick that Mac (found automatically on the same network)
+   or "Another address" and type its Tailscale name (`macbook-pro.your-tailnet.ts.net`) or 100.x address; enter
+   the pairing code and press "Use this Mac".
+
+The laptop then shows the other Mac's models, LoRAs and upscalers, the live preview streams back, and the images
+are saved in the laptop's gallery with their settings. The laptop needs no model files (and doesn't load any).
+
+Protocol: one WebSocket per job (`Sources/WaiRemote`, Network.framework, Bonjour `_waigen._tcp`). The sharing Mac
+accepts only local-network and Tailscale addresses, only after the pairing code (wrong codes are slowed down), and
+only references to files in its own models folder. Over Wi-Fi the traffic isn't encrypted; over Tailscale it is.
+Jobs from other Macs queue with the Mac's own jobs and use the models already loaded; Stop on one Mac only stops
+that Mac's job. `waigen-cli --remote host[:port] --code ABC-123 -p "..."` (or `--remote bonjour:<name>`) is a
+command-line client.
 
 ## How WAI-ANIMA runs in MLX
 

@@ -18,6 +18,7 @@ import ImageIO
 import MLX
 import MLXRandom
 import WaiMLX
+import WaiRemote
 
 func fail(_ msg: String) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
@@ -93,6 +94,10 @@ let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16
 let vaeRoundtrip = take("--vae-roundtrip")        // WAI-ANIMA: encode + decode an image with the VAE
 let esrganTest = take("--esrgan-test")            // upscale an image with --hires-upscaler and time it
 let benchConv = flag("--bench-conv")              // 3x3 convs: MLX's conv2d vs matmul rewrites (time + diff)
+let serveTest = take("--serve-test")              // port: a test generator (dummy images) to check the protocol
+let remoteAddress = take("--remote")             // host[:port] of a Mac sharing WAI Gen: generate there
+let remoteCode = take("--code") ?? ""             // its pairing code
+let remotePreset = take("--preset") ?? "wai-v16"  // with --remote: preset id (wai-v16, wai-anima)
 let makeLycoris = take("--make-test-lycoris")     // dir: synthetic LoHa / LoKr / LoRA files for WAI-ANIMA
 let repeats = take("--repeat").flatMap(Int.init) ?? 1
 let output = take("--output", "-o") ?? "waigen.png"
@@ -195,6 +200,71 @@ if benchConv {
                      t1 * 1000, t0 / t1, t2 * 1000, t0 / t2, d1, d2, d3))
         Memory.clearCache()
     }
+    finish(0)
+}
+
+if let serveTest {
+    final class Dummy: RemoteJobHandler, @unchecked Sendable {
+        func remoteInfo() async -> RemoteInfo {
+            RemoteInfo(name: "test server", presets: ["wai-v16"], loras: [], upscalers: [], faceDetector: false, loadedModels: [], busy: false)
+        }
+        func runRemote(_ job: RemoteJob, id: UUID, client: String, progress: @escaping @Sendable (RemoteProgress) -> Void,
+                       preview: @escaping @Sendable (Data) -> Void) async throws -> (png: Data, seconds: Double, faceRepairSeconds: Double?) {
+            print("job from \(client): \(job.width)x\(job.height) \(job.steps) steps")
+            for i in 1 ... 3 { progress(RemoteProgress(.sampling, step: i, total: 3)); try await Task.sleep(nanoseconds: 100_000_000) }
+            return (Data(repeating: 7, count: 1000), 0.3, nil)
+        }
+        func cancelRemote(id: UUID) { print("cancel \(id)") }
+    }
+    let handler = Dummy()
+    let server = RemoteServer(handler: handler, code: "TST-123", name: "waigen test", port: UInt16(serveTest) ?? 47861)
+    server.onStatus = { print("server: \($0)") }
+    server.onActivity = { c, r in print("activity: \(c) \(r)") }
+    do { try server.start() } catch { fail(error.localizedDescription) }
+    print("test server on port \(server.port), code TST-123")
+    dispatchMain()
+}
+
+if let remoteAddress {
+    // "bonjour:<name>" for a Mac found on the local network, else host[:port]
+    let endpoint = remoteAddress.hasPrefix("bonjour:")
+        ? RemoteEndpoint(name: String(remoteAddress.dropFirst(8)), service: String(remoteAddress.dropFirst(8)))
+        : RemoteEndpoint.address(remoteAddress)
+    guard let endpoint else { fail("--remote host[:port] or bonjour:<name>") }
+    let client = RemoteClient(endpoint: endpoint, code: remoteCode)
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let t0 = Date()
+            let info = try await client.info()
+            print(String(format: "%@: models %@, %d LoRAs, upscalers %@, face repair %@, in memory %@ (%.2fs)", info.name,
+                         info.presets.joined(separator: ", "), info.loras.count, info.upscalers.map(\.name).joined(separator: ", "),
+                         info.faceDetector ? "yes" : "no", info.loadedModels.joined(separator: ", "), Date().timeIntervalSince(t0)))
+            if prompt.isEmpty { finish(0) }
+            let job = RemoteJob(
+                presetID: remotePreset, positive: prompt, negative: negative, characters: [], userPrompt: prompt,
+                width: width ?? 1024, height: height ?? 1344, steps: steps ?? 28, cfg: Double(cfg ?? 6),
+                sampler: samplerName ?? "euler_ancestral", scheduler: schedulerName ?? "normal",
+                seed: Int64(truncatingIfNeeded: seed),
+                hires: hires.map { .init(scale: Double($0), steps: hiresSteps ?? 15, denoise: Double(hiresDenoise ?? 0.4)) },
+                faceRepair: faceDetector != nil ? .init(strength: Double(faceStrength), confidence: 0.3, prompt: "") : nil,
+                loras: loras.map { .init(relativePath: $0.url.lastPathComponent, strength: Double($0.strength)) },
+                hiresUpscaler: hiresUpscalerPath, livePreview: previewDir != nil, stepCache: stepCacheThreshold != nil,
+                upscale: nil)
+            var previews = 0
+            let ts = Date()
+            let r = try await client.run(job, progress: { p in
+                FileHandle.standardError.write(Data("\r\(p.kind.rawValue) \(p.step)/\(p.total)\(p.hires ? " hi-res" : "")    ".utf8))
+            }, preview: { _ in previews += 1 })
+            FileHandle.standardError.write(Data("\n".utf8))
+            try r.png.write(to: outputURL(1))
+            print(String(format: "done in %.2fs (server %.2fs%@), %d previews, %d KB PNG -> %@", Date().timeIntervalSince(ts),
+                         r.seconds, r.faceRepairSeconds.map { String(format: ", face repair %.2fs", $0) } ?? "", previews,
+                         r.png.count / 1024, outputURL(1).lastPathComponent))
+        } catch { fail(error.localizedDescription) }
+        semaphore.signal()
+    }
+    semaphore.wait()
     finish(0)
 }
 

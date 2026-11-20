@@ -9,6 +9,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "WaiMLX", targets: ["WaiMLX"]),
+        .library(name: "WaiRemote", targets: ["WaiRemote"]),
         .executable(name: "waigen-cli", targets: ["waigen-cli"]),
         .executable(name: "WAIGen", targets: ["WAIGen"]),
     ],
@@ -27,7 +28,9 @@ let package = Package(
             ],
             resources: [.copy("Resources")]
         ),
-        .executableTarget(name: "waigen-cli", dependencies: ["WaiMLX"]),
-        .executableTarget(name: "WAIGen", dependencies: ["WaiMLX"]),
+        // Generating on another Mac: WebSocket protocol, server, client, Bonjour discovery (Network.framework).
+        .target(name: "WaiRemote"),
+        .executableTarget(name: "waigen-cli", dependencies: ["WaiMLX", "WaiRemote"]),
+        .executableTarget(name: "WAIGen", dependencies: ["WaiMLX", "WaiRemote"]),
     ]
 )

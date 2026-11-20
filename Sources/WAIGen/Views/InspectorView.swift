@@ -19,8 +19,31 @@ struct InspectorView: View {
 
         Form {
             Section {
+                if model.isRemote {
+                    if let info = model.remoteInfo {
+                        Label("Generating on \(info.name)", systemImage: "network")
+                            .foregroundStyle(.blue)
+                            .help("Settings ▸ Generator chooses where images are made")
+                        if !info.loadedModels.isEmpty {
+                            Label("In memory there: \(info.loadedModels.joined(separator: ", "))", systemImage: "memorychip")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    } else {
+                        HStack {
+                            Label(model.remoteStatus ?? "Not connected to \(model.generatorName)", systemImage: "network.slash")
+                                .foregroundStyle(.orange).lineLimit(2)
+                            Spacer()
+                            Button("Retry") { model.connectGenerator() }
+                        }
+                    }
+                }
+                if let client = model.servingClient {
+                    Label("Generating for \(client)", systemImage: "arrow.down.left.and.arrow.up.right")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if !missing.isEmpty {
-                    Label("Model files missing", systemImage: "exclamationmark.triangle.fill")
+                    Label(model.isRemote ? "Not available on \(model.generatorName)" : "Model files missing",
+                          systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                         .help(missing.joined(separator: "\n"))
                 } else if model.settings.matches(preset) {
@@ -35,7 +58,9 @@ struct InspectorView: View {
                     }
                     .help(preset.source)
                 }
-                if let loading = model.backgroundLoading {
+                if model.isRemote {
+                    EmptyView()
+                } else if let loading = model.backgroundLoading {
                     Label("Loading \(loading) in the background…", systemImage: "arrow.down.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 } else if !model.loadedModels.isEmpty {
