@@ -151,6 +151,8 @@ struct StyleCell: View {
                             .padding(5)
                     }
                 }
+                .hoverPreview(image, id: "style:" + entry.id, title: entry.tag,
+                              subtitle: "\(entry.works.formatted()) works on Danbooru")
             Text(entry.tag).font(.caption).lineLimit(1).truncationMode(.middle)
             HStack(spacing: 3) {
                 Text("\(entry.works.formatted()) works")

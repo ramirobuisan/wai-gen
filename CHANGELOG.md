@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Hover over a style's or a character's thumbnail to see it bigger: after a moment a card with the image, the name and
+  its Danbooru count appears over the canvas beside the sidebar (moving to another thumbnail swaps it at once).
+
 ## 0.3.0 (2026-11-20)
 
 - Styles in the sidebar (Characters | Styles): 16,006 Danbooru artist styles from ThetaCursed's Illustrious & NoobAI

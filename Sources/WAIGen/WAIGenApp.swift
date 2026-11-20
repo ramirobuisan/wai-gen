@@ -114,6 +114,15 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
             CanvasView()
+                .overlay(alignment: .topLeading) {
+                    if let item = model.hoverPreview {
+                        HoverPreviewCard(item: item)
+                            .padding(12)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                    }
+                }
+                .animation(.easeOut(duration: 0.12), value: model.hoverPreview?.id)
         }
         .inspector(isPresented: $model.showInspector) {
             InspectorView()

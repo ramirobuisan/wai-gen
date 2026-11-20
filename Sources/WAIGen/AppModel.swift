@@ -50,6 +50,8 @@ final class AppModel {
     var livePreview: NSImage?
     var errorMessage: String?
     var showInspector = true
+    /// the sidebar thumbnail under the pointer, shown bigger over the canvas
+    var hoverPreview: HoverPreviewItem?
     var loraFiles: [LoRAFile] = []
     /// Upscaler models WAI Gen can run: (file name, scale)
     var upscalerFiles: [(name: String, scale: Int)] = []

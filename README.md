@@ -25,6 +25,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
   ([ThetaCursed's Style Explorer](https://github.com/ThetaCursed/Illustrious-NoobAI-Style-Explorer), made with
   Illustrious XL, the base of WAI v16); sort by popularity, name or distinctiveness, or shuffle; a click adds the
   artist to the prompt (as `@name` on WAI-ANIMA, as Anima expects)
+- Hover over a character or style thumbnail to see it bigger
 - Danbooru tag autocomplete, `(tag:1.2)` weights, wildcards (`__name__`, nested)
 - Hi-res fix with an ESRGAN upscaler (e.g. RealESRGAN x4plus anime 6B), face repair (ADetailer-style, YOLOv8 face detector)
 - Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw

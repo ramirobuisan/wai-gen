@@ -78,6 +78,7 @@ struct CharacterRow: View {
             }
             .frame(width: 34, height: 44)
             .clipShape(RoundedRectangle(cornerRadius: 4))
+            .hoverPreview(thumb, id: "character:" + entry.tag, title: entry.tag, subtitle: entry.localName)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.tag).lineLimit(1)
