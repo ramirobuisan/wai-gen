@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-20)
 
 - Styles in the sidebar (Characters | Styles): 16,006 Danbooru artist styles from ThetaCursed's Illustrious & NoobAI
   Style Explorer (MIT), each with a sample made with Illustrious XL from one fixed prompt. Search, favourites, sort by
@@ -10,6 +10,10 @@
   first needed, from a pinned commit, and kept in Application Support.
 - Characters sort by popularity (Danbooru posts, from the tag list, shown on each row) or by name.
 - Name sorting ignores leading punctuation; "1 match" instead of "1 matches".
+
+Update: WAI Gen 0.2.0 offers this version in **Settings → Updates** (and an "Update to 0.3.0" button in the toolbar).
+From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time, allow it
+in **System Settings → Privacy & Security → Open Anyway**.
 
 ## 0.2.0 (2026-11-20)
 
