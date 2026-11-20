@@ -2,7 +2,8 @@ import SwiftUI
 
 struct CharacterSidebar: View {
     @Environment(AppModel.self) private var model
-    @State private var query = ""
+    /// the sidebar's search text (LibrarySidebar owns the field)
+    let query: String
 
     var body: some View {
         let store = model.characters
@@ -30,17 +31,22 @@ struct CharacterSidebar: View {
                 }
             }
             if store.state == .ready {
-                Section(query.isEmpty ? "All characters" : "\(results.count) matches") {
+                Section(query.isEmpty ? "All characters" : "\(results.count) match\(results.count == 1 ? "" : "es")") {
                     ForEach(results) { CharacterRow(entry: $0) }
                 }
             }
         }
         .listStyle(.sidebar)
-        .searchable(text: $query, placement: .sidebar,
-                    prompt: store.characters.isEmpty ? "Search characters" : "Search \(store.characters.count.formatted()) characters")
         .safeAreaInset(edge: .bottom) {
+            @Bindable var store = model.characters
             VStack(alignment: .leading, spacing: 4) {
                 Divider()
+                Picker("Sort", selection: $store.sort) {
+                    ForEach(CharacterStore.Sort.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal, 10)
+                .help("Popularity: the character's number of posts on Danbooru")
                 Picker("Character list", selection: Binding(
                     get: { model.characterList }, set: { model.characterList = $0 })) {
                     ForEach(CharacterListID.allCases) { Text($0.label).tag($0) }
@@ -75,7 +81,14 @@ struct CharacterRow: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.tag).lineLimit(1)
-                Text(entry.localName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Group {
+                    if let posts = model.characters.posts(entry) {
+                        Text("\(posts.formatted()) posts · \(entry.localName)")
+                    } else {
+                        Text(entry.localName)
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
             if model.characters.favorites.contains(entry.tag) {

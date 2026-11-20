@@ -167,6 +167,16 @@ struct PromptPanel: View {
                     }
                 }
             }
+            if !model.settings.artists.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Styles").font(.caption).foregroundStyle(.secondary)
+                    FlowLayout(spacing: 6) {
+                        ForEach(model.settings.artists, id: \.self) { tag in
+                            CharacterChip(tag: tag) { model.toggleStyle(tag) }
+                        }
+                    }
+                }
+            }
             PromptField(title: "Prompt", text: $model.settings.prompt,
                         placeholder: "1girl, solo, cowboy shot, night city, neon lights",
                         completion: completion, minHeight: 64)

@@ -50,6 +50,8 @@ struct GenerationJob: Identifiable, Sendable {
     /// EasyCache step skipping (GenerationService.sdxlStepCache / animaStepCache)
     var stepCache = false
     var upscale: UpscaleRequest? = nil
+    /// artist styles (already in `positive`; kept for the image's record)
+    var artists: [String] = []
 }
 
 enum JobProgress: Sendable {

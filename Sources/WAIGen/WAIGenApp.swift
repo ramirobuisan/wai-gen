@@ -110,7 +110,7 @@ struct ContentView: View {
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            CharacterSidebar()
+            LibrarySidebar()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 380)
         } detail: {
             CanvasView()

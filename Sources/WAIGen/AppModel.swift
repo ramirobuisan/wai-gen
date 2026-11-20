@@ -29,6 +29,7 @@ final class AppModel {
         didSet { if settings != oldValue { settings.save() } }
     }
     let characters = CharacterStore()
+    let styles = StyleStore()
     @ObservationIgnored let tags = TagIndex()
     /// new versions from GitHub releases
     let updater = Updater()
@@ -335,7 +336,9 @@ final class AppModel {
                 _exit(0)
             }
         }
+        characters.tagIndex = tags
         characterList = preset.characterList
+        if UserDefaults.standard.string(forKey: "sidebarTab") == "styles" { styles.loadIfNeeded() }
         Wildcards.seedFromSAA()
         refreshLoRAs()
         refreshUpscalers()
@@ -345,7 +348,10 @@ final class AppModel {
             do {
                 let url = try await AppPaths.ensureDataFile(AppPaths.tagListName, url: AppPaths.tagListURL)
                 try tags.load(from: url)
-                await MainActor.run { self.tagsReady = true }
+                await MainActor.run {
+                    self.tagsReady = true
+                    self.characters.refreshPopularity()   // sort characters by popularity
+                }
             } catch {
                 // autocomplete stays off; generation still works
             }
@@ -373,13 +379,29 @@ final class AppModel {
         }
     }
 
-    /// The prompt sent to the engine: characters (+ tag assist), quality tags, then the user's prompt.
+    // MARK: styles
+
+    func toggleStyle(_ tag: String) {
+        if let i = settings.artists.firstIndex(of: tag) {
+            settings.artists.remove(at: i)
+        } else {
+            settings.artists.append(tag)
+        }
+    }
+
+    /// An artist's tag as the selected model expects it: Anima (WAI-ANIMA) wants "@name", Illustrious the plain tag.
+    func styleTag(_ tag: String) -> String {
+        preset.engine == .anima ? "@" + escapeTag(tag) : escapeTag(tag)
+    }
+
+    /// The prompt sent to the engine: characters (+ tag assist), artist styles, quality tags, then the user's prompt.
     func assemblePositive(seed: Int64, userPrompt: String? = nil) -> String {
         var parts = [String]()
         for c in settings.characters {
             parts.append(escapeTag(c))
             if settings.tagAssist, let extra = characters.assistTags(for: c) { parts.append(extra) }
         }
+        parts += settings.artists.map(styleTag)
         if settings.useQualityPrefix, !settings.qualityPrefix.isEmpty { parts.append(settings.qualityPrefix) }
         let user = (userPrompt ?? settings.prompt).trimmingCharacters(in: .whitespacesAndNewlines)
         if !user.isEmpty { parts.append(user) }
@@ -443,7 +465,7 @@ final class AppModel {
                     : nil,
                 loras: jobLoRAs,
                 hiresUpscaler: upscalerURL,
-                livePreview: s.livePreview, stepCache: s.stepCache)
+                livePreview: s.livePreview, stepCache: s.stepCache, artists: s.artists)
             pending.append(job)
         }
         processNext()
@@ -517,7 +539,8 @@ final class AppModel {
             faceRepair: detail && s.faceRepair && faceDetectorAvailable
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
             loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview, stepCache: s.stepCache,
-            upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail))
+            upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
+            artists: r.map { $0.artists ?? [] } ?? s.artists)
         pending.append(job)
         processNext()
     }
@@ -633,6 +656,7 @@ final class AppModel {
             loras: job.loras.isEmpty ? nil : job.loras.map { LoRARecord(path: $0.relativePath, strength: $0.strength) },
             hiresUpscaler: job.hires == nil ? nil : (job.hiresUpscaler?.lastPathComponent ?? "built-in"))
         if job.stepCache { record.stepCache = true }
+        if !job.artists.isEmpty { record.artists = job.artists }
         if let up = job.upscale {
             record.upscaledFrom = up.source.lastPathComponent
             record.upscaleDetailPass = up.detailPass
@@ -683,6 +707,7 @@ final class AppModel {
             selectModel(p)
         }
         settings.characters = record.characters
+        settings.artists = record.artists ?? []
         settings.prompt = record.userPrompt
         settings.negative = record.negative
         settings.steps = record.steps

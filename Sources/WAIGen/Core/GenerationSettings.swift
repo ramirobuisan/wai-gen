@@ -4,6 +4,7 @@ import Foundation
 struct GenerationSettings: Codable, Equatable {
     var modelID = ModelCatalog.presets[0].id
     var characters: [String] = []          // unescaped tags, e.g. "rebecca (cyberpunk)"
+    var artists: [String] = []             // artist styles, unescaped tags (Styles in the sidebar)
     var prompt = ""
     var negative = ModelCatalog.waiNegative
     var qualityPrefix = ModelCatalog.presets[0].defaults.qualityPrefix

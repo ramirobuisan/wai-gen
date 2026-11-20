@@ -35,6 +35,8 @@ struct GenerationRecord: Codable, Hashable {
     var upscaleDetailPass: Bool? = nil
     /// true when made with the step cache (EasyCache) on
     var stepCache: Bool? = nil
+    /// artist styles picked in the sidebar (their tags are in `positive`)
+    var artists: [String]? = nil
 
     /// A1111-style "parameters" text (with ADetailer's key names), readable by other tools.
     var parametersText: String {

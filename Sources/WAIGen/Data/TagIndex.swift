@@ -41,6 +41,18 @@ final class TagIndex: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Danbooru post counts for these tags (lowercase, underscores), found by name or alias.
+    func postCounts(for keys: Set<String>) -> [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        var out = [String: Int]()
+        for e in entries {   // most used first, so an alias keeps its most used tag's count
+            if keys.contains(e.key), out[e.key] == nil { out[e.key] = e.count }
+            for a in e.aliases where keys.contains(a) && out[a] == nil { out[a] = e.count }
+        }
+        return out
+    }
+
     /// Up to `limit` tags starting with `prefix` (most used first), then alias matches.
     func complete(_ prefix: String, limit: Int = 8) -> [TagSuggestion] {
         let q = prefix.lowercased().trimmingCharacters(in: .whitespaces)

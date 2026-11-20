@@ -19,7 +19,12 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 
 ## Features
 
-- Character sidebar with the 5000+ characters and thumbnails of Character Select SAA, favourites, search
+- Character sidebar with the 5000+ characters and thumbnails of Character Select SAA, favourites, search, sorted by
+  popularity (Danbooru posts) or name
+- Styles sidebar: 16,006 Danbooru artist styles, each with a sample from the same prompt so only the style changes
+  ([ThetaCursed's Style Explorer](https://github.com/ThetaCursed/Illustrious-NoobAI-Style-Explorer), made with
+  Illustrious XL, the base of WAI v16); sort by popularity, name or distinctiveness, or shuffle; a click adds the
+  artist to the prompt (as `@name` on WAI-ANIMA, as Anima expects)
 - Danbooru tag autocomplete, `(tag:1.2)` weights, wildcards (`__name__`, nested)
 - Hi-res fix with an ESRGAN upscaler (e.g. RealESRGAN x4plus anime 6B), face repair (ADetailer-style, YOLOv8 face detector)
 - Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw
@@ -104,7 +109,9 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 | `loras/*.safetensors` | your LoRAs |
 
 Character data, thumbnails and the tag list are downloaded on first start from Character Select SAA's
-data (or copied from an existing SAA install).
+data (or copied from an existing SAA install). The style list (2.3 MB) is downloaded the first time you open
+Styles, and each style's sample (about 55 KB) the first time it's shown; they're kept in
+`~/Library/Application Support/WAI Gen/data/styles` (delete that folder to free the space).
 
 ## Generating on another Mac
 
@@ -155,6 +162,7 @@ tensor dictionaries and never executes pickle code.
   pipeline, tokenizers, sampler, ADetailer geometry and YOLOv8 decoding are ported from it; the Qwen2 BPE merges
   and T5 vocabulary in `Sources/WaiMLX/Resources` are the ones it embeds (Qwen and Google T5 tokenizers, Apache-2.0)
 - [Character Select SAA](https://github.com/mirabarukaso/character_select_stand_alone_app) (MIT) for the character data and the workflow this app reproduces
+- [Illustrious & NoobAI Style Explorer](https://github.com/ThetaCursed/Illustrious-NoobAI-Style-Explorer) by ThetaCursed (MIT) for the artist style list and samples
 - Sampling and checkpoint-key conventions follow [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and k-diffusion; CLIP BPE vocabulary from OpenAI CLIP (MIT)
 - The WAI models are by WAI0731; check each model's license on Civitai before using the images
 

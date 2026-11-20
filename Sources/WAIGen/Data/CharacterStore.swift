@@ -7,6 +7,8 @@ struct CharacterEntry: Identifiable, Hashable {
     let tag: String        // unescaped Danbooru tag, e.g. "rebecca (cyberpunk)"
     let localName: String  // name from the dataset (Chinese)
     var id: String { tag }
+    /// how the tag list (danbooru_e621_merged.csv) writes it
+    var tagKey: String { tag.lowercased().replacingOccurrences(of: " ", with: "_") }
     var thumbKey: String { Insecure.MD5.hash(data: Data(escapeTag(tag).utf8)).map { String(format: "%02x", $0) }.joined() }
 }
 
@@ -15,11 +17,26 @@ struct CharacterEntry: Identifiable, Hashable {
 @MainActor @Observable
 final class CharacterStore {
     enum State: Equatable { case idle, loading(String), ready, failed(String) }
+    enum Sort: String, CaseIterable, Identifiable {
+        case popularity, name
+        var id: String { rawValue }
+        var label: String { self == .popularity ? "Popularity" : "Name" }
+    }
 
     private(set) var list: CharacterListID?
     private(set) var state: State = .idle
     private(set) var characters: [CharacterEntry] = []
     private(set) var favorites: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "favoriteCharacters") ?? [])
+    /// Danbooru posts per character tag (from the tag list, once it has loaded)
+    private(set) var popularity: [String: Int] = [:]
+    var sort: Sort = Sort(rawValue: UserDefaults.standard.string(forKey: "characterSort") ?? "") ?? .popularity {
+        didSet {
+            UserDefaults.standard.set(sort.rawValue, forKey: "characterSort")
+            order()
+        }
+    }
+    /// the tag list, for popularity (set by AppModel)
+    @ObservationIgnored weak var tagIndex: TagIndex?
 
     @ObservationIgnored private var thumbs: [String: String] = [:]
     @ObservationIgnored private var tagAssist: [String: String] = [:]
@@ -48,7 +65,9 @@ final class CharacterStore {
                 self.tagAssist = assist
                 self.thumbs = thumbs
                 self.cache.removeAllObjects()
+                self.order()
                 self.state = .ready
+                self.refreshPopularity()
             } catch {
                 if !Task.isCancelled { state = .failed(error.localizedDescription) }
             }
@@ -58,6 +77,33 @@ final class CharacterStore {
     func toggleFavorite(_ tag: String) {
         if favorites.contains(tag) { favorites.remove(tag) } else { favorites.insert(tag) }
         UserDefaults.standard.set(Array(favorites).sorted(), forKey: "favoriteCharacters")
+    }
+
+    func posts(_ entry: CharacterEntry) -> Int? { popularity[entry.tagKey] }
+
+    /// Looks up every character's post count in the tag list (call again once the tag list has loaded).
+    func refreshPopularity() {
+        guard let index = tagIndex, index.isLoaded, !characters.isEmpty else { return }
+        let keys = Set(characters.map(\.tagKey))
+        Task {
+            let counts = await Task.detached(priority: .utility) { index.postCounts(for: keys) }.value
+            guard keys == Set(characters.map(\.tagKey)) else { return }   // the list changed meanwhile
+            popularity = counts
+            order()
+        }
+    }
+
+    private func order() {
+        switch sort {
+        case .name:
+            characters.sort { nameSortKey($0.tag).localizedStandardCompare(nameSortKey($1.tag)) == .orderedAscending }
+        case .popularity:
+            let p = popularity
+            characters.sort {
+                let a = p[$0.tagKey] ?? 0, b = p[$1.tagKey] ?? 0
+                return a != b ? a > b : $0.tag.localizedStandardCompare($1.tag) == .orderedAscending
+            }
+        }
     }
 
     /// Extra tags SAA's "tag assist" adds for a character (e.g. gender for ambiguous names).
@@ -106,6 +152,9 @@ final class CharacterStore {
         return (obj as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
     }
 }
+
+/// For sorting by name: ".sin" sorts as "sin", not before "a".
+func nameSortKey(_ name: String) -> Substring { name.drop { !$0.isLetter && !$0.isNumber } }
 
 func splitCSVLine(_ line: String) -> [String] {
     var fields = [String]()

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Styles in the sidebar (Characters | Styles): 16,006 Danbooru artist styles from ThetaCursed's Illustrious & NoobAI
+  Style Explorer (MIT), each with a sample made with Illustrious XL from one fixed prompt. Search, favourites, sort by
+  popularity (Danbooru works), name or distinctiveness, or shuffle. A click adds the artist after the characters
+  (`@name` on WAI-ANIMA, as Anima's model card asks); the chosen styles show under the prompt, are saved in each
+  image's record and come back with "use settings". The list (2.3 MB) and each sample (~55 KB) are downloaded when
+  first needed, from a pinned commit, and kept in Application Support.
+- Characters sort by popularity (Danbooru posts, from the tag list, shown on each row) or by name.
+- Name sorting ignores leading punctuation; "1 match" instead of "1 matches".
+
 ## 0.2.0 (2026-11-20)
 
 The first release on GitHub. From this version on, WAI Gen updates itself from the releases here.
