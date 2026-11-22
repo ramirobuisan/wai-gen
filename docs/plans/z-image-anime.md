@@ -101,3 +101,38 @@ Facts from ComfyUI's `_forward` you must match:
 9. **Log** what you measured below. Don't release.
 
 ## Log
+
+- **Step 0 (reference tensors).** `scripts/zimage_reference.py`, run with ComfyUI's venv python from the ComfyUI
+  folder on MPS (torch 2.13.0, bf16). Wrote `/Users/cookies/Developer/zimage-ref/ref.safetensors` (all float32)
+  plus `reference_run.log`. Fixed prompt, seed 42, noise `[1, 16, 128, 128]` (CPU torch `randn`).
+  - Detected config (from ComfyUI): `dim 3840, n_layers 30, n_heads 30, n_kv_heads 30, axes_dims [32, 48, 48],
+    axes_lens [1536, 512, 512], rope_theta 256, ffn_dim_multiplier 2.6667, z_image_modulation True, time_scale
+    1000, pad_tokens_multiple 32, cap_feat_dim 2560, in_channels 16, patch_size 2`; sampling `multiplier 1.0,
+    shift 3.0`. One extra checkpoint key, top-level `norm_final.weight`, is *unexpected* by `NextDiT` (its
+    `norm_final` is inside `final_layer`, affine-free LayerNorm) — ignore that tensor in the port.
+  - Tokens: 31 ids, special tokens as single ids (`[151644, 872, 198, 94670, ..., 151645, 198, 151644, 77091, 198]`);
+    attention mask all ones. Conditioning `cond` = [1, 31, 2560] float32 (returned on CPU), min -4517.3, max
+    +13677.4, mean +0.292 (raw hidden states, no final norm, big values — bf16 relative-error checks must be
+    relative, not absolute).
+  - DiT direct call: `diffusion_model(x, timesteps, context, num_tokens)` returns bf16 [1, 16, 128, 128];
+    σ=1.0: min -9.4375 max +6.28125 mean -0.0237; σ=0.5: min -4.28125 max +4.8125 mean +0.0333.
+    `apply_model(x, σ, c_crossattn, num_tokens=)` returns float32 and equals `x − σ·out` **exactly**
+    (max abs diff 0.0 at both sigmas), i.e. CONST flow: denoised = latent − σ · (negated velocity).
+    Denoised σ=1.0 range [-3.398, +4.844]; σ=0.5 range [-3.516, +3.561].
+  - `vae.decode` of the noise latent's first 64×64 crop (crop treated as a raw z — `comfy.sd.VAE.decode` does
+    *no* latent-format scaling; sampler applies `process_latent_out` = `z/0.3611 + 0.1159` before decode, and
+    `process_latent_in` = `(z − 0.1159)·0.3611` after encode): [1, 512, 512, 3] float32 (NHWC), clipped to [0, 1].
+  - Facts verified in the ComfyUI code for the port: text `layer_idx=-2` resolves to `len(layers)-2 = 34`, captured
+    **after running decoder layer 34** (0-based; 35 of 36 layers) with `final_layer_norm_intermediate=False` → no
+    final norm. Block adaLN (z_image): `Sequential(Linear(256 → 4·3840))` — **no SiLU** before the Linear — chunked
+    `scale_msa, gate_msa, scale_mlp, gate_mlp`; use is `x += tanh(gate)·norm2(clamp(attn(modulate(norm1(x), scale))))`
+    with `modulate(x, s) = x·(1+s)` (scale only, no shift) and gates passed through `tanh`. `final_layer` adaLN
+    **does** have SiLU, then `linear(silu(c))` → scale. JointAttention: fused `qkv`, per-head RMS q/k norm (eps 1e-5,
+    `norm_eps` default) **before** RoPE; RoPE is Flux-style `EmbedND` (theta 256, per-axis `1/256^linspace(0,(d−2)/d, d/2)`,
+    axes concatenated in order → pairs of *adjacent* elements rotated: dims 0-31 by axis 0, 32-79 by axis 1, 80-127
+    by axis 2). Caption pos ids: `[arange(padded cap len) + 1, 0, 0]`; image: `[padded cap len + 1, row, col]`.
+    FeedForward hidden = 3840·2.6667 → 10240 (`multiple_of` rounding), SwiGLU `w2(silu(w1 x)·w3 x)` with `clamp_fp16`
+    on the gated product.
+  - ComfyUI API notes for re-runs: `load_models_gpu(models)` mutates in place and returns None (`force_full_load=True`);
+    `clip.tokenize(text)["qwen3_4b"]` is a *list of batches of (id, weight) pairs*; `encode_from_tokens(tokens,
+    return_dict=True)` gives `{"cond", "pooled_output", "attention_mask"}`.
