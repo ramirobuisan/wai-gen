@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Faster by default**: Step cache and Faster hi-res guidance are now on by default, and switched on once in saved
+  settings. A test that added every speed-up one at a time on top of the others found this the fastest combination
+  that keeps the look: about 25 % faster on WAI v16 and about 50 % on WAI-ANIMA (with face repair, RealESRGAN and
+  Euler a kept). The built-in upscaler, token downsampling and Fast mode were slower or changed the picture
+  (docs/PERFORMANCE.md, round 11). Both can still be switched off in the inspector.
+- **NoobAI-XL 1.1** (EPS) as a third model (⌘3): put `NoobAI-XL-v1.1.safetensors` from Laxhar's Hugging Face page in
+  `models/checkpoints`. Its preset follows the model card: 832×1216, Euler a, 28 steps, CFG 5, its quality tags and
+  negative prompt. It runs on the WAI v16 engine with all its speed-ups.
+- **LyCORIS LoRAs on WAI v16 / NoobAI-XL**: LoCon, LoKr and LoHa files and trained norm layers now merge (only plain
+  LoRAs did before; the others were skipped with a warning). DoRA isn't supported yet.
+- LoRA previews: a LoRA with an image next to it (`<name>.preview.jpeg`, as ComfyUI's LoRA managers save them, or
+  `<name>.png`) shows it in the inspector; hover for the big version.
+- MLX 0.33 (mlx-swift 0.33.0): about 2 % faster, the same images.
 - **Faster hi-res guidance now works on WAI-ANIMA too**: there the hi-res pass computes the guidance on every 3rd
   step and reuses it in between, about 10-20 % faster per image (hi-res pass ~20 % shorter) with the same look
   (WAI v16 keeps every 2nd step).

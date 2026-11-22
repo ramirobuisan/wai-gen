@@ -11,6 +11,7 @@ ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt)
 | Model | Engine |
 |---|---|
 | WAI-illustrious-SDXL v16 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
+| NoobAI-XL 1.1 (EPS) | the same SDXL engine, with all of its speed-ups |
 | WAI-ANIMA v1.0 | **MLX**: the Anima diffusion model, Qwen3 text encoder, Qwen-Image VAE, tokenizers and flow sampler ported from stable-diffusion.cpp (same seeds give the same images) |
 
 The ESRGAN upscaler and the YOLOv8 face detector run in MLX too.
@@ -29,10 +30,14 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - Danbooru tag autocomplete, `(tag:1.2)` weights, wildcards (`__name__`, nested)
 - Hi-res fix with an ESRGAN upscaler (e.g. RealESRGAN x4plus anime 6B), face repair (ADetailer-style, YOLOv8 face detector)
 - Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw
-- LoRAs for both engines (merged into the MLX models), with a warning when a LoRA was made for the other model family
+- LoRAs for both engines (merged into the MLX models): LoRA, LoCon, LoKr and LoHa (LyCORIS, trained norm layers
+  included), with a warning when a LoRA was made for the other model family
 - Fast mode: a quicker sampler with fewer steps (~30 % faster, slightly different look)
-- Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-30 % faster, nearly the same image)
-- Faster hi-res guidance: guidance on every 2nd (WAI v16) or 3rd (WAI-ANIMA) hi-res step, reused in between (~10-18 % faster, nearly the same image)
+- Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-35 % faster, nearly the same
+  image; Euler a only)
+- Faster hi-res guidance: guidance on every 2nd (WAI v16) or 3rd (WAI-ANIMA) hi-res step, reused in between (~10-20 %
+  faster, nearly the same image)
+- Both on by default: together about 25 % faster on WAI v16 and 50 % on WAI-ANIMA (docs/PERFORMANCE.md, round 11)
 - Live preview of every step (latent projection, no extra time)
 - Gallery: upscale with a detail pass or upscaler-only ×2, reuse prompt/settings/seed, info, ← / → to browse,
   ⌘⌫ or the trash button to move an image to the Trash (⌘Z puts it back), Copy Image (⇧⌘C) copies the PNG,
@@ -106,6 +111,7 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 | File | Where |
 |---|---|
 | `checkpoints/waiIllustriousSDXL_v160.safetensors` | [WAI-illustrious-SDXL on Civitai](https://civitai.com/models/827184) |
+| `checkpoints/NoobAI-XL-v1.1.safetensors` | [Laxhar/noobai-XL-1.1](https://huggingface.co/Laxhar/noobai-XL-1.1) (optional) |
 | `diffusion_models/waiANIMA_v10Base10.safetensors` | WAI-ANIMA on Civitai |
 | `text_encoders/qwen_3_06b_base.safetensors`, `vae/qwen_image_vae.safetensors` | [Comfy-Org](https://huggingface.co/Comfy-Org) repackaged files |
 | `upscale_models/RealESRGAN_x4plus_anime_6B.pth` | [Real-ESRGAN releases](https://github.com/xinntao/Real-ESRGAN/releases) |

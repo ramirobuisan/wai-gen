@@ -299,6 +299,13 @@ final class AppModel {
             if settings.hiresSteps == 20 { settings.hiresSteps = preset.defaults.hiresSteps }
             UserDefaults.standard.set(2, forKey: "settingsRevision")
         }
+        // 2026-11-22: Step cache and Faster hi-res guidance are on by default, the fastest combination that keeps the
+        // look (docs/PERFORMANCE.md, round 11); switched on once for saved settings too
+        if UserDefaults.standard.integer(forKey: "settingsRevision") < 3 {
+            settings.stepCache = true
+            settings.fastHiresGuidance = true
+            UserDefaults.standard.set(3, forKey: "settingsRevision")
+        }
         service.onModelsChanged = { [generatorHost] loaded, loading in
             generatorHost.setLoaded(loaded)
             Task { @MainActor in

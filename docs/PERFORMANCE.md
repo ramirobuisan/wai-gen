@@ -567,6 +567,62 @@ WAI-ANIMA job with the setting is bit-identical to the CLI's every-3rd-step imag
 in the CLI. The dropped experiments (`--base-guidance-every N,σ`, `--todo N`, `--scheduler ays`) and the MLX 0.33
 build stay on the `exp/overnight-speed` and `exp/mlx-0.33` branches.
 
+## Round 11 (2026-11-22): every speed-up stacked, the defaults, MLX 0.33, NoobAI-XL
+
+### Stacking the speed-ups
+
+Starting from the settings in use (Euler a, 1.5× hi-res with RealESRGAN, face repair on, nothing else), each speed-up
+was added on top of the ones before, two seeds, each image timed after a warm-up image in the same process. The Mac
+slowed as it heated up during the series, so later rows carry a penalty of a second or two. Times exclude the face
+pass (3-16 s, depending on the faces).
+
+| WAI v16 (seed 101 / 202) | total | WAI-ANIMA (seed 101 / 202) | total |
+|---|---|---|---|
+| your settings | 39.6 / 41.8 s | your settings | 181.8 / 162.8 s |
+| + Step cache | 29.7 / 34.9 s | + Step cache | 117.3 / 104.1 s |
+| + Faster hi-res guidance (every 2nd) | **28.8 / 32.4 s** | + every 3rd hi-res step | **85.2 / 88.0 s** |
+| + built-in upscaler | 30.1 / 30.2 s | + built-in upscaler | 84.6 / 85.1 s |
+| + ToDo, + MLX 0.33 | 30.7 / 33.1 s (noise) | + MLX 0.33 | 76.8 / 86.8 s |
+| Fast mode + every 2nd / AYS 10 + every 2nd | 43.5 / 35.4 s | | |
+
+Step cache + Faster hi-res guidance is the combination: about 25 % faster on WAI v16 and about 50 % on WAI-ANIMA, the
+same scenes (21-23 / 19-20 dB from the old settings, small details such as eye colour or shoes change, the quality
+doesn't). The built-in upscaler saves a second or two but changes and softens details at 100 % (a blouse becomes a
+shirt with a pocket, denim loses texture), so RealESRGAN stays. Fast mode can't use the step cache (round 10) and
+ends up slower. Both switches are now on by default, and on once for saved settings (`settingsRevision` 3).
+
+![WAI v16: your settings / + Step cache / + Faster hi-res guidance / + built-in upscaler](images/stack-wai-v16.jpg)
+![The built-in upscaler at 100 %](images/stack-upscaler-crop.jpg)
+![WAI-ANIMA: your settings / + Step cache / + every 3rd / + built-in upscaler / + MLX 0.33](images/stack-wai-anima.jpg)
+
+### MLX 0.33
+
+mlx-swift 0.33.0 (MLX 0.32.4) replaces 0.31.6. It needed one change (the compiled UNet closure is no longer
+`@Sendable`). Round 10 measured −1.3 to −2.5 % per image; in the stacked series it was within the drift. Images are
+the same at a glance (22-25 dB, rounding through Euler a). The app grows from 23 to 26 MB (larger Metal library).
+
+### NoobAI-XL 1.1 (EPS)
+
+A third preset on the WAI v16 engine (epsilon prediction, like Illustrious), with the model card's settings: 832×1216,
+Euler a, 28 steps, CFG 5, its quality prefix and negative. 832×1216 → 1.5× hi-res, face repair on:
+
+| | base | hi-res | total | face repair |
+|---|---|---|---|---|
+| without the speed-ups | 9.85 s | 17.22 s | 28.6 s | 3.3 s |
+| Step cache + Faster hi-res guidance | 7.53 s | 9.87 s | **18.9 s (−34 %)** | 4.1 s |
+
+### LyCORIS LoRAs on the SDXL engine
+
+WAI v16 and NoobAI-XL only merged plain LoRAs; the NoobAI LoRA list (25 files) is mostly LyCORIS. `LoRA.swift` now
+groups each file's tensors by module and builds the delta in PyTorch layout, flattened to (out, in·kh·kw), with
+stable-diffusion.cpp's / ComfyUI's rules: LoRA / LoCon `up·down · α/r`, LoHa `(w1a·w1b) ⊙ (w2a·w2b) · α/r`, LoKr
+`w1 ⊗ w2` (either factor optionally low-rank, `α/r` only then), conv deltas reshaped to MLX's (O, kh, kw, I). LyCORIS
+`train_norm` tensors (`w_norm`, `b_norm`) are added to the norm layers, and CLIP-G's `text_projection` is mapped.
+`waigen-cli --lora-report` applied all 25 files to NoobAI-XL: 792-1129 modules each, 0 unmatched, 0 unsupported.
+DoRA (`dora_scale`) and Tucker-decomposed LyCORIS are still reported as unsupported.
+
+![NoobAI-XL: no LoRA / LoRA / LoCon / LoKr / LoHa / LoKr with trained norms](images/noobai-lora-formats.jpg)
+
 ## Possible next steps
 
 - Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.

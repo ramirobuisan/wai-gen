@@ -36,9 +36,9 @@ struct GenerationSettings: Codable, Equatable {
     /// use the preset's fast sampler / step count instead of the ones above
     var fastMode = false
     /// skip model calls on steps that would barely change the image (EasyCache, see docs/PERFORMANCE.md)
-    var stepCache = false
+    var stepCache = true
     /// compute the guidance on only some hi-res steps and reuse it in between (docs/PERFORMANCE.md, rounds 9 and 10)
-    var fastHiresGuidance = false
+    var fastHiresGuidance = true
 
     /// Hi-res upscaler model in models/upscale_models ("" = built-in bicubic / Lanczos).
     var hiresUpscaler = "RealESRGAN_x4plus_anime_6B.pth"
