@@ -97,6 +97,7 @@ struct InspectorView: View {
                 SeedRow(seed: $model.settings.seed)
                 Stepper("Images: \(model.settings.batchCount)", value: $model.settings.batchCount, in: 1 ... 16)
                 Toggle("Live preview", isOn: $model.settings.livePreview)
+                    .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Fast mode", isOn: $model.settings.fastMode)
                     Text("\(preset.defaults.fast.sampler.label) · \(preset.defaults.fast.scheduler.label) · \(preset.defaults.fast.steps) steps: about 30 % faster, a slightly different look")
@@ -107,7 +108,6 @@ struct InspectorView: View {
                     Text("Reuses the model's output on steps where it barely changes: about 25 % faster, nearly the same image")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                    .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
             }
 
             CollapsibleSection(title: "Hi-res fix", isExpanded: $openHires) {
@@ -206,9 +206,10 @@ struct InspectorView: View {
                 }
                 Toggle("Tag assist", isOn: $model.settings.tagAssist)
                     .help("Adds the extra tags SAA's dataset lists for some characters")
-                if !Wildcards.available().isEmpty {
+                let wildcards = Wildcards.available()
+                if !wildcards.isEmpty {
                     LabeledContent("Wildcards") {
-                        Text(Wildcards.available().map { "__\($0)__" }.joined(separator: " "))
+                        Text(wildcards.map { "__\($0)__" }.joined(separator: " "))
                             .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                 }
@@ -270,7 +271,16 @@ struct SeedRow: View {
             TextField("Random", text: $text)
                 .multilineTextAlignment(.trailing)
                 .frame(maxWidth: 110)
-                .onSubmit { seed = Int64(text) ?? -1 }
+                // applies as you type (Generate right after typing uses it); empty = random
+                .onChange(of: text) { _, t in
+                    let s = t.trimmingCharacters(in: .whitespaces)
+                    if s.isEmpty {
+                        if seed != -1 { seed = -1 }
+                    } else if let v = Int64(s), v >= 0, v != seed {
+                        seed = v
+                    }
+                }
+                .onSubmit { text = seed < 0 ? "" : String(seed) }   // drops anything that isn't a number
             Button { seed = -1 } label: { Label("Random Seed", systemImage: "dice").labelStyle(.iconOnly) }
                 .buttonStyle(.borderless)
                 .help("Random seed for every image")

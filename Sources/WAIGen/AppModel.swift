@@ -52,6 +52,8 @@ final class AppModel {
     var showInspector = true
     /// the sidebar thumbnail under the pointer, shown bigger over the canvas
     var hoverPreview: HoverPreviewItem?
+    /// the app's main window (set by ContentView)
+    @ObservationIgnored weak var mainWindow: NSWindow?
     var loraFiles: [LoRAFile] = []
     /// Upscaler models WAI Gen can run: (file name, scale)
     var upscalerFiles: [(name: String, scale: Int)] = []
@@ -321,7 +323,8 @@ final class AppModel {
             let arrows: [UInt16: Int] = [123: -1, 124: 1]
             guard let delta = arrows[event.keyCode],
                   event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-                  let focus = event.window?.firstResponder,
+                  let window = event.window, MainActor.assumeIsolated({ window === self?.mainWindow }),   // not in Settings
+                  let focus = window.firstResponder,
                   // controls that use the arrows themselves keep them: text, sliders, pop-ups, lists
                   !(focus is NSText || focus is NSControl || focus is NSTableView || focus is NSCollectionView)
             else { return event }
@@ -344,8 +347,7 @@ final class AppModel {
         Wildcards.seedFromSAA()
         refreshLoRAs()
         refreshUpscalers()
-        gallery = ImageFiles.recentImages()
-        if let first = gallery.first { show(first) }
+        reloadGallery()
         Task.detached(priority: .utility) { [tags] in
             do {
                 let url = try await AppPaths.ensureDataFile(AppPaths.tagListName, url: AppPaths.tagListURL)
@@ -679,6 +681,26 @@ final class AppModel {
 
     // MARK: gallery
 
+    /// Read the gallery from the images folder again (at launch and after choosing another folder).
+    func reloadGallery() {
+        gallery = ImageFiles.recentImages()
+        if let first = gallery.first {
+            show(first)
+        } else {
+            selection = nil
+            displayedImage = nil
+        }
+    }
+
+    /// Copies the image file: Finder pastes the PNG itself (with its settings), other apps get the PNG image.
+    func copyImage(_ item: GalleryItem) {
+        let entry = NSPasteboardItem()
+        if let png = try? Data(contentsOf: item.url) { entry.setData(png, forType: .png) }
+        entry.setString(item.url.absoluteString, forType: .fileURL)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([entry])
+    }
+
     func show(_ item: GalleryItem) {
         selection = item
         displayedImage = NSImage(contentsOf: item.url)
@@ -765,18 +787,40 @@ final class AppModel {
         }
     }
 
+    /// the main window's undo stack (Edit → Undo / ⌘Z)
+    private var undoManager: UndoManager? { (mainWindow ?? NSApp.keyWindow)?.undoManager }
+
     func moveToTrash(_ item: GalleryItem) {
         guard canTrash(item) else { return }
         do {
-            try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+            var trashed: NSURL?
+            try FileManager.default.trashItem(at: item.url, resultingItemURL: &trashed)
             let index = gallery.firstIndex(of: item) ?? 0
             gallery.removeAll { $0.id == item.id }
             if selection == item {
                 // like Photos: select the neighbour, not the newest image
                 if gallery.isEmpty { selection = nil; displayedImage = nil } else { show(gallery[min(index, gallery.count - 1)]) }
             }
+            if let trashed = trashed as URL? {
+                undoManager?.registerUndo(withTarget: self) { $0.putBack(item, from: trashed, at: index) }
+                undoManager?.setActionName("Move to Trash")
+            }
         } catch {
             errorMessage = "Couldn't move the image to the Trash: \(error.localizedDescription)"
+        }
+    }
+
+    /// Undo of Move to Trash: the file comes back from the Trash to its place in the gallery.
+    private func putBack(_ item: GalleryItem, from trashed: URL, at index: Int) {
+        do {
+            try FileManager.default.createDirectory(at: item.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: trashed, to: item.url)
+            gallery.insert(item, at: min(index, gallery.count))
+            show(item)
+            undoManager?.registerUndo(withTarget: self) { $0.moveToTrash(item) }   // redo
+            undoManager?.setActionName("Move to Trash")
+        } catch {
+            errorMessage = "Couldn't put the image back: \(error.localizedDescription)"
         }
     }
 }

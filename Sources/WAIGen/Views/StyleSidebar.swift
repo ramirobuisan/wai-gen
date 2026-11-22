@@ -36,7 +36,7 @@ struct LibrarySidebar: View {
             return n == 0 ? "Search characters" : "Search \(n.formatted()) characters"
         case .styles:
             let n = model.styles.styles.count
-            return n == 0 ? "Search styles" : "Search \(n.formatted()) artists"
+            return n == 0 ? "Search styles" : "Search \(n.formatted()) styles"
         }
     }
 }

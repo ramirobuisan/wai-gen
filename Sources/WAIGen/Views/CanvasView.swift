@@ -102,13 +102,10 @@ struct ImageStage: View {
                         Label("Show in Finder", systemImage: "folder").labelStyle(.iconOnly)
                     }
                     .help("Show in Finder")
-                    Button {
-                        if let img = model.displayedImage {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.writeObjects([img])
-                        }
-                    } label: { Label("Copy Image", systemImage: "doc.on.doc").labelStyle(.iconOnly) }
-                        .help("Copy image")
+                    Button { model.copyImage(item) } label: {
+                        Label("Copy Image", systemImage: "doc.on.doc").labelStyle(.iconOnly)
+                    }
+                    .help("Copy image (⇧⌘C)")
                     Button { model.moveToTrash(item) } label: {
                         Label("Move to Trash", systemImage: "trash").labelStyle(.iconOnly)
                     }
@@ -235,6 +232,8 @@ struct GalleryStrip: View {
                     ForEach(model.gallery) { item in
                         GalleryThumb(item: item, selected: model.selection == item)
                             .id(item.id)
+                            // drag a thumbnail out to Finder or another app: the PNG file itself
+                            .onDrag { NSItemProvider(contentsOf: item.url) ?? NSItemProvider() }
                             .onTapGesture {
                                 // end text editing so ← / → browse the gallery
                                 NSApp.keyWindow?.makeFirstResponder(nil)
@@ -248,6 +247,7 @@ struct GalleryStrip: View {
                                     Button("Use prompt, settings and seed") { model.reuse(item, seed: true) }
                                     Divider()
                                 }
+                                Button("Copy Image") { model.copyImage(item) }
                                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
                                 Button("Move to Trash", role: .destructive) { model.moveToTrash(item) }
                                     .disabled(!model.canTrash(item))

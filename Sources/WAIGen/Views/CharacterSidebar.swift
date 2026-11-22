@@ -31,7 +31,8 @@ struct CharacterSidebar: View {
                 }
             }
             if store.state == .ready {
-                Section(query.isEmpty ? "All characters" : "\(results.count) match\(results.count == 1 ? "" : "es")") {
+                Section(query.isEmpty ? "\(results.count.formatted()) characters"
+                        : "\(results.count.formatted()) match\(results.count == 1 ? "" : "es")") {
                     ForEach(results) { CharacterRow(entry: $0) }
                 }
             }

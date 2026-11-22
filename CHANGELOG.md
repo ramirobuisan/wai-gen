@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Undo Move to Trash** (⌘Z, Edit → Undo): the image comes back from the Trash to its place in the gallery; ⇧⌘Z
+  trashes it again.
+- **Copy Image** copies the PNG file instead of a 9 MB TIFF: pasting in Finder gives the PNG with its settings, other
+  apps get the image. Also in the gallery's right-click menu and as Image → Copy Image (⇧⌘C).
+- Drag a gallery thumbnail to Finder or another app to drop the PNG file.
+- The seed field applies as you type: a seed typed right before Generate is used without pressing Return.
+- Settings: choosing another Images folder shows its images right away; choosing another Models folder rereads the
+  LoRAs and upscalers; the AI prompt server is saved as you type.
+- ← / → browse the gallery only in the main window, not while Settings is in front.
+- Small fixes: the Live preview tooltip was on the Step cache row; the sidebars count "5,094 characters" and
+  "16,006 styles" the same way; "Open data folder" (it also holds the style samples and the tag list).
+
 ## 0.3.2 (2026-11-22)
 
 - Delete the image you're looking at: a trash button beside Upscale / Info / Finder / Copy above the image, and

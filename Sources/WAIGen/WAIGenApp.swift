@@ -88,6 +88,9 @@ struct WAIGenApp: App {
                 Button("Use Prompt, Settings and Seed") { if let s = model.selection { model.reuse(s, seed: true) } }
                     .disabled(model.selection?.record == nil)
                 Divider()
+                Button("Copy Image") { if let s = model.selection { model.copyImage(s) } }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(model.selection == nil)
                 Button("Show in Finder") { if let s = model.selection { NSWorkspace.shared.activateFileViewerSelecting([s.url]) } }
                     .disabled(model.selection == nil)
                 // ⌘⌫ as in Finder; while the prompt or a field is being edited it deletes text there instead
@@ -131,6 +134,7 @@ struct ContentView: View {
         }
         .navigationTitle("WAI Gen")
         .navigationSubtitle(model.preset.name)
+        .background(WindowTracker { model.mainWindow = $0 })
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let update = model.updater.available {
@@ -177,6 +181,27 @@ struct ContentView: View {
     }
 }
 
+/// Tells the model which window is the main one (its undo stack; ← / → only browse there, not in Settings).
+private struct WindowTracker: NSViewRepresentable {
+    let found: (NSWindow?) -> Void
+
+    final class Tracker: NSView {
+        var found: (NSWindow?) -> Void = { _ in }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            found(window)
+        }
+    }
+
+    func makeNSView(context: Context) -> Tracker {
+        let v = Tracker()
+        v.found = found
+        return v
+    }
+
+    func updateNSView(_ v: Tracker, context: Context) {}
+}
+
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var modelsPath = AppPaths.models.path
@@ -192,7 +217,7 @@ struct SettingsView: View {
                 LabeledContent("Models") {
                     HStack {
                         Text(modelsPath).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                        Button("Choose…") { choose { AppPaths.models = $0; modelsPath = $0.path } }
+                        Button("Choose…") { choose { AppPaths.models = $0; modelsPath = $0.path; model.refreshLoRAs(); model.refreshUpscalers() } }
                     }
                 }
                 Text("Same layout as ComfyUI: checkpoints/, diffusion_models/, text_encoders/, vae/")
@@ -200,7 +225,7 @@ struct SettingsView: View {
                 LabeledContent("Images") {
                     HStack {
                         Text(outputPath).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                        Button("Choose…") { choose { AppPaths.output = $0; outputPath = $0.path } }
+                        Button("Choose…") { choose { AppPaths.output = $0; outputPath = $0.path; model.reloadGallery() } }
                     }
                 }
             }
@@ -208,7 +233,10 @@ struct SettingsView: View {
             GeneratorSettingsSections()
             Section("AI prompt") {
                 TextField("Server", text: $aiURL, prompt: Text(AIPrompt.defaultURL))
-                    .onSubmit { AIPrompt.baseURL = aiURL.isEmpty ? AIPrompt.defaultURL : aiURL }
+                    .onChange(of: aiURL) { _, v in   // saved as you type, no Return needed
+                        let url = v.trimmingCharacters(in: .whitespaces)
+                        AIPrompt.baseURL = url.isEmpty ? AIPrompt.defaultURL : url
+                    }
                 Text("Any OpenAI-compatible server. MLX-Serve listens on 127.0.0.1:11234 by default.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -231,7 +259,7 @@ struct SettingsView: View {
             }
             Section("Data") {
                 Button("Open wildcards folder") { NSWorkspace.shared.open(AppPaths.wildcards) }
-                Button("Open character data folder") { NSWorkspace.shared.open(AppPaths.data) }
+                Button("Open data folder (characters, styles, tags)") { NSWorkspace.shared.open(AppPaths.data) }
             }
             Section("Presets") {
                 ForEach(ModelCatalog.presets) { p in

@@ -34,7 +34,8 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-30 % faster, nearly the same image)
 - Live preview of every step (latent projection, no extra time)
 - Gallery: upscale with a detail pass or upscaler-only ×2, reuse prompt/settings/seed, info, ← / → to browse,
-  ⌘⌫ or the trash button to move an image to the Trash
+  ⌘⌫ or the trash button to move an image to the Trash (⌘Z puts it back), Copy Image (⇧⌘C) copies the PNG,
+  thumbnails drag out to Finder
 - Zoomable image (pinch, ⌘+ / ⌘−, double-click for 100 %, ⌘0 / ⌘9), collapsible inspector sections,
   hideable prompt and gallery (⌥⌘P / ⌥⌘G)
 - Models load in the background when the app opens (the selected model with its upscaler and face repair,
