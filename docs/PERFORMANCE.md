@@ -485,6 +485,84 @@ and Step cache); it also applies to the gallery's Upscale with detail pass. Imag
 `Hires guidance: every 2 steps` in their parameters and "Use Prompt and Settings" restores it. WAI-ANIMA wasn't
 tried yet (its CFG passes run separately, so the same trick would also save one pass per reused step).
 
+## Round 10 (2026-11-22, overnight): everything left on the list, measured
+
+Three seeds (the same prompts as round 9), WAI v16 1024×1344 → 1.5× hi-res with RealESRGAN, WAI-ANIMA its preset
+(25 steps, CFG 4.5). Every configuration ran twice in one process (a warm-up image of seed − 1, then the timed one),
+so kernels and compile traces are warm as in the app. Compare within a row: the Mac's speed drifted over the night.
+
+### Guidance reuse in the hi-res pass
+
+| | full guidance | every 2nd step | every 3rd step |
+|---|---|---|---|
+| WAI v16, Step cache on | 33.7 / 37.0 / 37.6 s | 30.8 / 33.3 / 33.3 s (−9 to −11 %), 33-38 dB | 31.0 / 32.4 / 32.4 s, 31-35 dB |
+| WAI-ANIMA, Step cache on | 84-88 s (hi-res 56-57 s) | 65-67 s (36 s), **−23 %**, 26-31 dB | 70-72 s (41 s), **−18 %**, 32-36 dB |
+| WAI-ANIMA, Step cache off | 131 s (hi-res 89 s) | 110 s (68 s), −16 %, 33-37 dB | |
+
+On WAI v16 every 3rd step saves only 0.2-1 s more than every 2nd (the step cache already skips many hi-res
+steps). On WAI-ANIMA with the step cache, every 2nd step deepens shadows a little; every 3rd step looks the same.
+
+The first WAI-ANIMA attempt gave oversaturated, pink images (15-17 dB): Anima's EasyCache keeps separate offsets
+for the prompt and negative passes, and on reused steps only the prompt's was refreshed, so on the next skipped
+step `cond − uncond` mixed outputs from different steps and carried the step's movement (× (cfg − 1) = 3.5). Now a
+step the cache skips keeps the last real guidance direction. (WAI v16's StepCache wraps the guided prediction, so
+it never had this.)
+
+![WAI-ANIMA, Step cache on: full guidance / every 2nd / every 3rd hi-res step / full again](images/anima-guidance-every-2-3.jpg)
+
+### Dropped
+
+| Change | Measured | Look |
+|---|---|---|
+| Guidance reuse in the base pass below σ 1.0 / 2.0 (with every 2nd hi-res step) | −0.2 to −0.6 s (1-2 %) | 20-24 dB: twin tails lost, sneakers and gaze change |
+| ToDo token downsampling (Smith et al., IJCAI 2024; 2×2-pooled keys/values) from 8192 positions (hi-res pass only) | −2.3 s (−6 %) | 25-30 dB, blush hatching and iris soften at 100 % |
+| same from 4096 positions (base pass too) | −3.3 to −4.3 s (−9 to −11 %) | 18 dB: washed out, content changes |
+| mlx-swift 0.33.0 (MLX 0.32.4) instead of 0.31.6 | UNet step within noise; full image −1.5 to −2.5 % (WAI v16), −1.3 % (WAI-ANIMA) | same pictures (22-25 dB, rounding through Euler a); builds with one change (`compiledUNet` loses `@Sendable`) |
+
+![ToDo: none / hi-res pass only / base pass too, 100 %](images/todo-wai-v16.jpg)
+
+### Align Your Steps for Fast mode (WAI v16, no Step cache)
+
+| normal, Euler a 28 | Fast mode now, DPM++ 2M Karras 16 | AYS, DPM++ 2M 10 | AYS, DPM++ 2M 12 |
+|---|---|---|---|
+| 48.2-50.7 s | 40.9-43.4 s | **37.2-39.5 s** | 38.4-41.0 s |
+
+`SchedulerKind.ays` is NVIDIA's SDXL schedule (log-linear interpolated for other step counts, as ComfyUI's
+AlignYourStepsScheduler). At 10 steps the images are as clean as Fast mode's at 16, 2-4 s faster; details and
+colours differ as with any sampler change (hair and eye colours the prompt doesn't fix).
+
+![Fast mode now / AYS 10 / AYS 12 / normal](images/fast-mode-ays.jpg)
+
+### Everything on, and a bug it found
+
+| | defaults | Step cache | Fast mode | Fast mode + Step cache + every 2nd hi-res step |
+|---|---|---|---|---|
+| WAI v16 | 47.7-48.0 s | 34.9-35.2 s | 40.5-40.7 s | 20.7-21.5 s, **grainy** |
+| WAI-ANIMA | 131 s | | 116 s | 38-40 s, one of three **grainy / photographic** |
+
+Taking the combination apart: Fast mode + every 2nd hi-res step is fine (36-47 dB from Fast mode alone; WAI v16
+34.5 s), **Fast mode + Step cache is what breaks**, and it isn't the step count but the sampler:
+
+| Step cache with | model calls skipped (WAI v16, base + hi-res) | image |
+|---|---|---|
+| Euler a 28 (the tuned case) | 13 of 43 | fine |
+| Euler a 16 | 5 | fine |
+| DPM++ 2M 28 / Euler 28 | 23-25 | washed out, hazy |
+| DPM++ 2M Karras 16 (Fast mode) / AYS 10 | 16 / 12 | grainy |
+| WAI-ANIMA Euler 25 | 14-15 (Euler a: 7-8) | hazy, style drifts |
+
+Euler a adds fresh noise every step, so the latent keeps moving and EasyCache's rate estimate stays honest; with
+deterministic samplers the input changes smoothly, the predicted change stays under the threshold and about half
+the calls are skipped. Released versions let Fast mode and Step cache be on together. Fix (branch
+`fix/step-cache-euler-a`): the step cache only applies with Euler a, and the inspector says when it isn't used.
+
+![Fast mode / + Step cache / + every 2nd hi-res step / AYS 10 + Step cache](images/fast-mode-step-cache-bug.jpg)
+![Step cache with Euler a 28 / DPM++ 2M 28 / Euler 28 / Euler a 16](images/step-cache-samplers.jpg)
+
+### CLI flags added
+
+`--base-guidance-every N,σ`, `--todo N`, `--hires-guidance-every N` (now WAI-ANIMA too), `--scheduler ays`.
+
 ## Possible next steps
 
 - Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.
