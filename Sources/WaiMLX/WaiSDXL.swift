@@ -33,6 +33,10 @@ public struct SDXLParameters: Sendable {
     /// > 1: the hi-res pass computes guidance only on every n-th model call and reuses the last guidance
     /// direction (cond − uncond) on the others, which run the UNet once (CFG caching, as in FasterCache).
     public var hiresGuidanceEvery = 1
+    /// Experimental: the base pass computes guidance on every n-th step once sigma <= `baseGuidanceReuseBelow`
+    /// (reusing the last direction in between); above it every step is guided.
+    public var baseGuidanceEvery = 1
+    public var baseGuidanceReuseBelow: Float = 1
 
     public init(prompt: String) { self.prompt = prompt }
 
@@ -66,6 +70,9 @@ public enum GenerationPhase: String, Sendable { case encode, sample, hires, deco
 
 /// Thrown by `WaiSDXL.generate` when the caller cancels.
 public struct WaiCancelled: Error {}
+
+/// Experimental ToDo token downsampling (see `UNetModel.todoMinTokens`); 0 = off. Call before generating.
+public func setToDoMinTokens(_ n: Int) { UNetModel.todoMinTokens = n }
 
 public final class WaiSDXL {
     public let checkpoint: URL
@@ -154,7 +161,8 @@ public final class WaiSDXL {
         guard var latent = sample(
             p.sampler,
             denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8, cache: cache,
-                              guided: p.guidanceRule),
+                              guided: p.guidanceRule ?? (p.baseGuidanceEvery > 1 ? { _ in true } : nil),
+                              guidanceEvery: p.baseGuidanceEvery, reuseBelow: p.baseGuidanceReuseBelow),
             x: x, sigmas: sigmas, isCancelled: isCancelled, preview: stepPreview, progress: { progress(.sample, $0, $1) })
         else { throw WaiCancelled() }
         tm.skippedSteps += cache?.skipped ?? 0
@@ -299,7 +307,8 @@ public final class WaiSDXL {
     /// `guidanceEvery` > 1: guidance is computed on every n-th guided call; the calls between run the UNet on
     /// the prompt alone and add the last guidance direction: eps_c + (cfg − 1)(eps_c − eps_u)_last.
     func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int,
-                  cache: StepCache? = nil, guided: ((Float) -> Bool)? = nil, guidanceEvery: Int = 1) -> Denoiser {
+                  cache: StepCache? = nil, guided: ((Float) -> Bool)? = nil, guidanceEvery: Int = 1,
+                  reuseBelow: Float = .infinity) -> Denoiser {
         let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
             .reshaped(1, 6)
         let textTime = (pooled, tiled(ids, repetitions: [2, 1]).asType(dtype))
@@ -318,8 +327,14 @@ public final class WaiSDXL {
                 let x1 = (x * cIn).asType(dtype)
                 let predict: () -> MLXArray = {
                     let wantsGuidance = guided(sigma)
-                    defer { if wantsGuidance { reuse.calls += 1 } }
-                    if wantsGuidance, reuse.direction == nil || reuse.calls % max(guidanceEvery, 1) == 0 {
+                    // only calls at sigma <= reuseBelow take part in the every-n-th rhythm
+                    let reusable = wantsGuidance && guidanceEvery > 1 && sigma <= reuseBelow
+                    var full = wantsGuidance
+                    if reusable {
+                        full = reuse.direction == nil || reuse.calls % guidanceEvery == 0
+                        reuse.calls += 1
+                    }
+                    if full {
                         let xIn = concatenated([x1, x1], axis: 0)
                         let timesteps = MLXArray([t, t])
                         let eps = compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
@@ -331,7 +346,7 @@ public final class WaiSDXL {
                     let timesteps = MLXArray([t])
                     let epsC = compiled.map { $0([x1, timesteps, condContext, condText.0, condText.1])[0] }
                         ?? unet(x1, timestep: timesteps, encoderX: condContext, textTime: condText)
-                    if wantsGuidance, let direction = reuse.direction { return epsC + (cfg - 1) * direction }
+                    if reusable, let direction = reuse.direction { return epsC + (cfg - 1) * direction }
                     return epsC
                 }
                 let e = (cache.map { $0(x1.asType(.float32), sigma: sigma, compute: predict) } ?? predict()).asType(x.dtype)

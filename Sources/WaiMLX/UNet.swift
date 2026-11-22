@@ -77,13 +77,20 @@ class TransformerBlock: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, memory: MLXArray, attentionMask: MLXArray?, memoryMask: MLXArray?
+        _ x: MLXArray, memory: MLXArray, attentionMask: MLXArray?, memoryMask: MLXArray?,
+        downsampleKV: (h: Int, w: Int)? = nil
     ) -> MLXArray {
         var x = x
 
         // self attention
         var y = norm1(x)
-        y = attn1(y, keys: y, values: y, mask: attentionMask)
+        var kv = y
+        if let (h, w) = downsampleKV {
+            // ToDo (Smith et al., IJCAI 2024): keys and values from a 2x2 average-pooled map, queries untouched
+            let (b, c) = (y.dim(0), y.dim(2))
+            kv = y.reshaped(b, h / 2, 2, w / 2, 2, c).mean(axes: [2, 4]).reshaped(b, -1, c)
+        }
+        y = attn1(y, keys: kv, values: kv, mask: attentionMask)
         x = x + y
 
         // cross attention
@@ -138,10 +145,13 @@ class Transformer2D: Module {
         x = norm(x).reshaped(B, -1, C)
         x = projectIn(x)
 
-        // apply the transformer
+        // apply the transformer (ToDo: experimental, off unless UNetModel.todoMinTokens > 0)
+        let minTokens = UNetModel.todoMinTokens
+        let todo: (h: Int, w: Int)? = minTokens > 0 && H * W >= minTokens && H % 2 == 0 && W % 2 == 0 ? (H, W) : nil
         for block in transformerBlocks {
             x = block(
-                x, memory: encoderX, attentionMask: attentionMask, memoryMask: encoderAttentionMask)
+                x, memory: encoderX, attentionMask: attentionMask, memoryMask: encoderAttentionMask,
+                downsampleKV: todo)
         }
 
         // apply the output projection and reshape
@@ -352,6 +362,10 @@ class UNetBlock2D: Module {
 }
 
 class UNetModel: Module {
+    /// Experimental ToDo token downsampling: self-attention on maps with at least this many positions uses
+    /// 2x2-pooled keys/values (0 = off). Set before the first image (the compiled UNet keeps its trace).
+    nonisolated(unsafe) static var todoMinTokens = 0
+
 
     @ModuleInfo(key: "conv_in") var convIn: Conv2d
     let timesteps: SinusoidalPositionalEncoding
