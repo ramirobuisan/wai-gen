@@ -2,7 +2,9 @@
 // layer names) and PEFT/diffusers (unet.* / text_encoder.* with lora_A/lora_B) files.
 // Deltas `strength * alpha / rank * up @ down` are merged into the weights; the original weights of
 // every touched layer are kept so a different LoRA set can be applied without reloading the model.
-// LyCORIS variants (LoHa, LoKr) are reported as unsupported.
+// LyCORIS LoCon, LoHa and LoKr (stable-diffusion.cpp's / ComfyUI's scale rules) and its trained norm layers
+// (train_norm: w_norm / b_norm added to the norm weights) are merged too; DoRA and Tucker-decomposed LyCORIS
+// tensors are reported as unsupported.
 
 import Foundation
 import MLX
@@ -20,7 +22,7 @@ public struct LoRASpec: Hashable, Sendable {
 public struct LoRAReport: Sendable {
     public var applied = 0          // layers changed
     public var unmatched: [String] = []
-    public var unsupported = 0      // LoHa/LoKr/... tensors
+    public var unsupported = 0      // DoRA / Tucker LyCORIS modules
     public var files = 0
 }
 
@@ -32,6 +34,7 @@ struct LoRATarget {
         case conv        // delta (O,I,kh,kw) -> MLX (O,kh,kw,I)
         case squeezed    // 1x1 conv stored as linear in MLX
         case gegluHalf(Int)  // diffusers ff.net.0.proj split into linear1 / linear2
+        case norm            // LyCORIS train_norm: w_norm -> weight, b_norm -> bias
     }
     let model: Model
     let key: String
@@ -61,6 +64,9 @@ func buildLoRATargets() -> [String: [LoRATarget]] {
         } else if dif.contains("conv") || dif.contains("downsamplers") || dif.contains("upsamplers") {
             targets = [LoRATarget(model: .unet, key: mlxKey, kind: .conv)]
         } else if dif.contains("norm") {
+            for name in ["unet:" + us(ldmBase), "unet:" + us(difBase)] {
+                add(name, LoRATarget(model: .unet, key: mlxKey, kind: .norm))
+            }
             continue
         } else {
             targets = [LoRATarget(model: .unet, key: mlxKey, kind: .linear)]
@@ -81,6 +87,8 @@ func buildLoRATargets() -> [String: [LoRATarget]] {
             }
         }
     }
+    // CLIP-G's final projection (some kohya LoRAs train it)
+    add("te2:text_projection", LoRATarget(model: .clipG, key: "text_projection.weight", kind: .linear))
     return map
 }
 
@@ -124,55 +132,74 @@ final class LoRAApplier {
         for spec in specs where spec.strength != 0 {
             report.files += 1
             let tensors = try loadArrays(url: spec.url)
-            var bases = Set<String>()
-            for k in tensors.keys {
-                for suffix in [".lora_down.weight", ".lora_A.weight"] where k.hasSuffix(suffix) {
-                    bases.insert(String(k.dropLast(suffix.count)))
-                }
-                if k.contains(".hada_") || k.contains(".lokr_") { report.unsupported += 1 }
+            // group the file's tensors by module: "lora_unet_x.lokr_w1" -> ["lora_unet_x": ["lokr_w1": ...]]
+            var groups: [String: [String: MLXArray]] = [:]
+            for (k, v) in tensors {
+                guard let (base, role) = splitLoRAKey(k) else { continue }
+                groups[base, default: [:]][role] = v
             }
-            for base in bases.sorted() {
+            for (base, p) in groups.sorted(by: { $0.key < $1.key }) {
                 guard let name = normaliseLoRAName(base), let ts = targets[name] else {
                     report.unmatched.append(base)
                     continue
                 }
-                let down = (tensors[base + ".lora_down.weight"] ?? tensors[base + ".lora_A.weight"])!.asType(.float32)
-                guard let up = (tensors[base + ".lora_up.weight"] ?? tensors[base + ".lora_B.weight"])?.asType(.float32)
-                else { report.unmatched.append(base); continue }
-                let rank = down.dim(0)
-                let alpha = tensors[base + ".alpha"].map { $0.asType(.float32).item(Float.self) } ?? Float(rank)
-                let scale = spec.strength * alpha / Float(rank)
-                // full-shape delta in PyTorch layout
-                var delta = matmul(up.reshaped(up.dim(0), rank), down.reshaped(rank, -1)) * scale
-                if down.ndim == 4 { delta = delta.reshaped(up.dim(0), down.dim(1), down.dim(2), down.dim(3)) }
-
-                for t in ts {
-                    var d = delta
-                    switch t.kind {
-                    case .linear, .squeezed:
-                        d = d.reshaped(d.dim(0), -1)
-                    case .conv:
-                        if d.ndim == 2 { d = d.reshaped(d.dim(0), d.dim(1), 1, 1) }
-                        d = d.transposed(0, 2, 3, 1)
-                    case .gegluHalf(let half):
-                        let parts = d.reshaped(d.dim(0), -1).split(parts: 2, axis: 0)
-                        d = parts[half]
-                    }
-                    let current = updates[t.model]?[t.key] ?? params[t.model]?[t.key]
-                    guard let w = current, w.shape == d.shape else {
-                        report.unmatched.append(base)
-                        continue
-                    }
-                    let id = "\(t.model)|\(t.key)"
-                    if originals[id] == nil, let orig = params[t.model]?[t.key] {
+                func add(_ t: LoRATarget, _ key: String, _ d: MLXArray) -> Bool {
+                    guard let w = updates[t.model]?[key] ?? params[t.model]?[key], w.shape == d.shape else { return false }
+                    let id = "\(t.model)|\(key)"
+                    if originals[id] == nil, let orig = params[t.model]?[key] {
                         // Module.update replaces array contents in place, so keep a materialised copy
                         let saved = orig * 1
                         eval(saved)
                         originals[id] = (t.model, saved)
                     }
-                    updates[t.model, default: [:]][t.key] = (w.asType(.float32) + d).asType(w.dtype)
-                    report.applied += 1
+                    updates[t.model, default: [:]][key] = (w.asType(.float32) + d).asType(w.dtype)
+                    return true
                 }
+                // LyCORIS trained norm layers
+                if p["w_norm"] != nil || p["b_norm"] != nil {
+                    guard let t = ts.first(where: { if case .norm = $0.kind { true } else { false } }) else {
+                        report.unmatched.append(base)
+                        continue
+                    }
+                    let bias = String(t.key.dropLast("weight".count)) + "bias"
+                    var ok = true
+                    if let wn = p["w_norm"] { ok = add(t, t.key, wn.asType(.float32) * spec.strength) && ok }
+                    if let bn = p["b_norm"] { ok = add(t, bias, bn.asType(.float32) * spec.strength) && ok }
+                    if ok { report.applied += 1 } else { report.unmatched.append(base) }
+                    continue
+                }
+                if p["dora_scale"] != nil || p["hada_t1"] != nil || p["hada_t2"] != nil || p["lokr_t1"] != nil
+                    || p["lokr_t2"] != nil {
+                    report.unsupported += 1
+                    continue
+                }
+                guard let (delta2D, scale) = loraDelta(p) else {
+                    report.unmatched.append(base)
+                    continue
+                }
+                // full delta in PyTorch layout, flattened to (out, in * kh * kw)
+                let delta = delta2D * (scale * spec.strength)
+                var applied = false
+                for t in ts {
+                    var d: MLXArray
+                    switch t.kind {
+                    case .norm:
+                        continue
+                    case .linear, .squeezed:
+                        d = delta
+                    case .conv:
+                        // MLX conv weights are (O, kh, kw, I); PyTorch's (O, I, kh, kw)
+                        guard let w = params[t.model]?[t.key], w.ndim == 4, delta.size == w.size else { continue }
+                        d = delta.reshaped(w.dim(0), w.dim(3), w.dim(1), w.dim(2)).transposed(0, 2, 3, 1)
+                    case .gegluHalf(let half):
+                        d = delta.split(parts: 2, axis: 0)[half]
+                    }
+                    if add(t, t.key, d) {
+                        report.applied += 1
+                        applied = true
+                    }
+                }
+                if !applied { report.unmatched.append(base) }
             }
         }
 
@@ -198,4 +225,48 @@ final class LoRAApplier {
         originals.removeAll()
         current = []
     }
+}
+
+/// "lora_unet_x.lokr_w1" -> ("lora_unet_x", "lokr_w1"); "x.lora_down.weight" -> ("x", "down"). nil for other tensors.
+func splitLoRAKey(_ key: String) -> (String, String)? {
+    let roles: [(String, String)] = [
+        (".lora_down.weight", "down"), (".lora_A.weight", "down"), (".lora_up.weight", "up"), (".lora_B.weight", "up"),
+        (".hada_w1_a", "hada_w1_a"), (".hada_w1_b", "hada_w1_b"), (".hada_w2_a", "hada_w2_a"), (".hada_w2_b", "hada_w2_b"),
+        (".hada_t1", "hada_t1"), (".hada_t2", "hada_t2"),
+        (".lokr_w1_a", "lokr_w1_a"), (".lokr_w1_b", "lokr_w1_b"), (".lokr_w2_a", "lokr_w2_a"), (".lokr_w2_b", "lokr_w2_b"),
+        (".lokr_w1", "lokr_w1"), (".lokr_w2", "lokr_w2"), (".lokr_t1", "lokr_t1"), (".lokr_t2", "lokr_t2"),
+        (".w_norm", "w_norm"), (".b_norm", "b_norm"), (".dora_scale", "dora_scale"), (".alpha", "alpha"),
+    ]
+    for (suffix, role) in roles where key.hasSuffix(suffix) {
+        return (String(key.dropLast(suffix.count)), role)
+    }
+    return nil
+}
+
+/// The module's weight delta in PyTorch layout flattened to (out, in * kh * kw), and its scale (before strength).
+/// LoRA / LoCon: up · down, alpha / rank. LoHa: (w1a · w1b) ⊙ (w2a · w2b), alpha / rank. LoKr: w1 ⊗ w2 (each
+/// optionally a low-rank pair), alpha / rank when a factor is decomposed, else 1 (stable-diffusion.cpp, ComfyUI).
+func loraDelta(_ p: [String: MLXArray]) -> (MLXArray, Float)? {
+    func f(_ k: String) -> MLXArray? { p[k].map { $0.asType(.float32) } }
+    func flat(_ a: MLXArray) -> MLXArray { a.reshaped(a.dim(0), -1) }
+    let alpha = p["alpha"].map { $0.asType(.float32).item(Float.self) }
+    if let down = f("down"), let up = f("up") {
+        let rank = down.dim(0)
+        return (matmul(flat(up), flat(down)), (alpha ?? Float(rank)) / Float(rank))
+    }
+    if let a1 = f("hada_w1_a"), let b1 = f("hada_w1_b"), let a2 = f("hada_w2_a"), let b2 = f("hada_w2_b") {
+        let rank = b1.dim(0)
+        return (matmul(flat(a1), flat(b1)) * matmul(flat(a2), flat(b2)), alpha.map { $0 / Float(rank) } ?? 1)
+    }
+    var w1 = f("lokr_w1"), w2 = f("lokr_w2")
+    var rank: Int? = nil
+    if w1 == nil, let a = f("lokr_w1_a"), let b = f("lokr_w1_b") { w1 = matmul(flat(a), flat(b)); rank = b.dim(0) }
+    if w2 == nil, let a = f("lokr_w2_a"), let b = f("lokr_w2_b") { w2 = matmul(flat(a), flat(b)); rank = b.dim(0) }
+    guard let w1, let w2 else { return nil }
+    // Kronecker product; with a conv w2 (o2, i2, kh, kw) flattened, rows/columns land as (o1 o2, i1 i2 kh kw)
+    let a = flat(w1), b = flat(w2)
+    let kron = (a[0..., .newAxis, 0..., .newAxis] * b[.newAxis, 0..., .newAxis, 0...])
+        .reshaped(a.dim(0) * b.dim(0), a.dim(1) * b.dim(1))
+    let scale: Float = if let rank, let alpha { alpha / Float(rank) } else { 1 }
+    return (kron, scale)
 }

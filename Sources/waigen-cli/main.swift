@@ -78,6 +78,7 @@ let loras: [LoRASpec] = loraArgs.map { a in
     return LoRASpec(url: URL(fileURLWithPath: path), strength: strength)
 }
 let loraSelfTest = take("--lora-selftest")         // SDXL: generate with / without a LoRA and compare
+let loraReport = flag("--lora-report")             // SDXL: apply each --lora on its own and print what merged, no image
 let stepCacheThreshold = take("--step-cache").flatMap(Float.init)   // EasyCache threshold (0.5 in the app)
 // WAI v16: guidance only while lo < sigma <= hi ("0.28,5.42"; "0,inf" = every step) and/or none in the hi-res pass
 let guidanceInterval = take("--guidance-interval").map { $0.split(separator: ",").compactMap { Float(String($0)) } }
@@ -531,6 +532,19 @@ if let diffusionPath {
             print(String(format: "%dx%d batch %d compile %@: %.3f s/step per image", wh[0], wh[1], batch,
                          compiled ? "on " : "off", s))
         }
+        finish(0)
+    }
+    if loraReport {
+        for spec in loras {
+            do {
+                let t = Date()
+                let r = try engine.setLoRAs([spec])
+                print(String(format: "%@: applied %d, unmatched %d, unsupported %d (%.2fs)",
+                             spec.url.lastPathComponent, r.applied, r.unmatched.count, r.unsupported, Date().timeIntervalSince(t)))
+                if !r.unmatched.isEmpty { print("  unmatched e.g. " + r.unmatched.prefix(3).joined(separator: ", ")) }
+            } catch { print("\(spec.url.lastPathComponent): \(error.localizedDescription)") }
+        }
+        _ = try? engine.setLoRAs([])
         finish(0)
     }
     if let loraSelfTest {
