@@ -74,6 +74,9 @@ public struct AnimaParameters: Sendable {
     public var mask: Data? = nil
     /// EasyCache reuse threshold (stable-diffusion.cpp's `easycache`); nil = off
     public var stepCache: Float? = nil
+    /// > 1: guidance only on every n-th step; the steps between run the model on the prompt alone and add the
+    /// last guidance direction (eps_c + (cfg − 1)(eps_c − eps_u)_last). For the hi-res pass (docs/PERFORMANCE.md).
+    public var guidanceEvery = 1
     public init(prompt: String) { self.prompt = prompt }
 }
 
@@ -234,20 +237,32 @@ public final class WaiAnima {
         func model(_ x: MLXArray, _ c: Cond, _ t: MLXArray) -> MLXArray {
             dit(x, timesteps: t, context: c.context, tokenIDs: c.ids, tokenWeights: c.weights)
         }
+        var direction: MLXArray? = nil   // last cond − uncond (guidanceEvery > 1)
+        var calls = 0
         func denoise(_ x: MLXArray, _ sigma: Float, _ step: Int) -> MLXArray {
             let t = MLXArray([sigma * 1000 / 1000])
             let active = sigma <= startSigma && sigma > endSigma
-            let condOut: MLXArray, uncondOut: MLXArray
-            if let cache, active {
-                condOut = cache.run(anchor: true, x, step: step) { model(x, cond, t) }
-                uncondOut = cache.run(anchor: false, x, step: step) { model(x, uncond, t) }
+            let reuseGuidance = p.guidanceEvery > 1 && direction != nil && calls % p.guidanceEvery != 0
+            calls += 1
+            let cached = cache != nil && active
+            let condOut = cached ? cache!.run(anchor: true, x, step: step) { model(x, cond, t) } : model(x, cond, t)
+            let guided: MLXArray
+            if let direction, reuseGuidance || (p.guidanceEvery > 1 && cached && cache!.skippingCurrentStep) {
+                // the last real guidance direction: on the steps between, and on steps the step cache skips (its
+                // negative-pass offset may be older than the prompt's, so cond − uncond would carry the step's move)
+                guided = condOut + (p.cfg - 1) * direction
             } else {
-                // one pass at a time (as two separate graphs): measurably faster than one graph with both
-                condOut = model(x, cond, t)
-                eval(condOut)
-                uncondOut = model(x, uncond, t)
+                let uncondOut: MLXArray
+                if cached {
+                    uncondOut = cache!.run(anchor: false, x, step: step) { model(x, uncond, t) }
+                } else {
+                    // one pass at a time (as two separate graphs): measurably faster than one graph with both
+                    eval(condOut)
+                    uncondOut = model(x, uncond, t)
+                }
+                if p.guidanceEvery > 1 { direction = condOut - uncondOut }
+                guided = uncondOut + p.cfg * (condOut - uncondOut)
             }
-            let guided = uncondOut + p.cfg * (condOut - uncondOut)
             var d = x - sigma * guided   // c_skip 1, c_out -sigma
             if let mask { d = d * mask + initLatent * (1 - mask) }
             return d
@@ -333,6 +348,8 @@ final class EasyCache {
     private var currentStep = -1
     private var skipStep = false
     private(set) var skipped = 0
+    /// true when the current step reuses the cached outputs (set by the anchor call)
+    var skippingCurrentStep: Bool { skipStep }
 
     init(threshold: Float) { self.threshold = threshold }
 

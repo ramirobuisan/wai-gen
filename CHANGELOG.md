@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Faster hi-res guidance now works on WAI-ANIMA too**: there the hi-res pass computes the guidance on every 3rd
+  step and reuses it in between, about 10-20 % faster per image (hi-res pass ~20 % shorter) with the same look
+  (WAI v16 keeps every 2nd step).
+  Measured in docs/PERFORMANCE.md, round 10.
+
 ## 0.3.4 (2026-11-22)
 
 - Fixed: **Step cache with Fast mode** (or with the Euler / DPM++ 2M samplers) made grainy or washed-out images: with

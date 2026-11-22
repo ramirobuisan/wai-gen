@@ -52,7 +52,7 @@ struct GenerationJob: Identifiable, Sendable {
     var upscale: UpscaleRequest? = nil
     /// artist styles (already in `positive`; kept for the image's record)
     var artists: [String] = []
-    /// WAI v16 hi-res / detail pass: guidance on every n-th step, reused in between (1 = every step)
+    /// hi-res / detail pass: guidance on every n-th step, reused in between (1 = every step)
     var hiresGuidanceEvery = 1
 }
 
@@ -407,6 +407,7 @@ final class GenerationService: @unchecked Sendable {
         p.initImage = image.resized(width: width, height: height).pixels
         p.strength = Float(denoise)
         p.steps = Int((Double(steps) / max(denoise, 0.05)).rounded(.up))   // runs steps x strength of them
+        p.guidanceEvery = job.hiresGuidanceEvery
         if isCancelled { throw CancellationError() }
         progress(.preparingHires)
         let out = try engine.generate(p, isCancelled: { self.isCancelled }, preview: preview(job, progress)) { i, n in

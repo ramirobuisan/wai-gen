@@ -82,7 +82,7 @@ let stepCacheThreshold = take("--step-cache").flatMap(Float.init)   // EasyCache
 // WAI v16: guidance only while lo < sigma <= hi ("0.28,5.42"; "0,inf" = every step) and/or none in the hi-res pass
 let guidanceInterval = take("--guidance-interval").map { $0.split(separator: ",").compactMap { Float(String($0)) } }
 let hiresNoGuidance = flag("--hires-no-guidance")
-let hiresGuidanceEvery = take("--hires-guidance-every").flatMap(Int.init)   // 2 = guidance every other hi-res call
+let hiresGuidanceEvery = take("--hires-guidance-every").flatMap(Int.init)   // 2 = guidance every other hi-res call (both models)
 let previewDir = take("--preview-dir")            // save every step's live preview here
 let refinePath = take("--refine")                 // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
@@ -248,7 +248,7 @@ if let remoteAddress {
                          info.presets.joined(separator: ", "), info.loras.count, info.upscalers.map(\.name).joined(separator: ", "),
                          info.faceDetector ? "yes" : "no", info.loadedModels.joined(separator: ", "), Date().timeIntervalSince(t0)))
             if prompt.isEmpty { finish(0) }
-            let job = RemoteJob(
+            var job = RemoteJob(
                 presetID: remotePreset, positive: prompt, negative: negative, characters: [], userPrompt: prompt,
                 width: width ?? 1024, height: height ?? 1344, steps: steps ?? 28, cfg: Double(cfg ?? 6),
                 sampler: samplerName ?? "euler_ancestral", scheduler: schedulerName ?? "normal",
@@ -258,6 +258,7 @@ if let remoteAddress {
                 loras: loras.map { .init(relativePath: $0.url.lastPathComponent, strength: Double($0.strength)) },
                 hiresUpscaler: hiresUpscalerPath, livePreview: previewDir != nil, stepCache: stepCacheThreshold != nil,
                 upscale: nil)
+            if let hiresGuidanceEvery { job.hiresGuidanceEvery = hiresGuidanceEvery }
             var previews = 0
             let ts = Date()
             let r = try await client.run(job, progress: { p in
@@ -431,6 +432,7 @@ if let diffusionPath {
                 q.initImage = src.resized(width: q.width, height: q.height).pixels
                 q.strength = denoise
                 q.steps = Int((Float(n) / max(denoise, 0.05)).rounded(.up))
+                q.guidanceEvery = hiresGuidanceEvery ?? 1
                 let out = try anima.generate(q, preview: previewSink()) { i, k in showProgress("hires", i, k) }
                 FileHandle.standardError.write(Data("\n".utf8))
                 return RGBImage(out)

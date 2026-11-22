@@ -471,7 +471,7 @@ final class AppModel {
                 hiresUpscaler: upscalerURL,
                 livePreview: s.livePreview, stepCache: s.stepCache && (fast?.sampler ?? s.sampler).supportsStepCache,
                 artists: s.artists,
-                hiresGuidanceEvery: s.fastHiresGuidance && preset.engine == .sdxl ? 2 : 1)
+                hiresGuidanceEvery: s.fastHiresGuidance ? preset.engine.fastHiresGuidanceEvery : 1)
             pending.append(job)
         }
         processNext()
@@ -549,7 +549,7 @@ final class AppModel {
             stepCache: s.stepCache && upscaleSampler.supportsStepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
             artists: r.map { $0.artists ?? [] } ?? s.artists,
-            hiresGuidanceEvery: detail && s.fastHiresGuidance && p.engine == .sdxl ? 2 : 1)
+            hiresGuidanceEvery: detail && s.fastHiresGuidance ? p.engine.fastHiresGuidanceEvery : 1)
         pending.append(job)
         processNext()
     }

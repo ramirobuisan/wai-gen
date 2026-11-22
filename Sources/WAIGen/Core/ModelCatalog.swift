@@ -4,6 +4,16 @@ import Foundation
 enum EngineKind: String, Codable {
     case sdxl = "MLX"
     case anima = "MLX (Anima)"
+
+    /// "Faster hi-res guidance": the hi-res pass computes the guidance on every n-th step. WAI v16: every 2nd
+    /// (every 3rd saves little more, the step cache already skips many); WAI-ANIMA: every 3rd, which looks the same,
+    /// where every 2nd deepens shadows a little (docs/PERFORMANCE.md, rounds 9 and 10).
+    var fastHiresGuidanceEvery: Int {
+        switch self {
+        case .sdxl: 2
+        case .anima: 3
+        }
+    }
 }
 
 /// Sampler choices shown in the app, mapped to each engine's own names.
