@@ -1,25 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 (2026-11-22)
 
+Faster:
+- **Faster face repair on WAI v16**: faces are repainted at 768 px unless they're bigger than that (close-ups keep
+  1024 px), as WAI-ANIMA already did. About 40 % less time for face repair (one face 4.5-5 s → ~3 s, two faces
+  ~10 s → ~6 s) with the same look. Measured in docs/PERFORMANCE.md, round 8.
 - **Faster hi-res guidance** (inspector ▸ Hi-res fix, WAI v16, off by default): the hi-res pass computes the guidance
-  on every other step and reuses it in between, about 10 % faster per image with nearly the same picture (measured
-  in docs/PERFORMANCE.md, round 9). Also used by the gallery's Upscale with detail pass.
-- The seed field no longer shows "Random" next to a fixed seed (it's only the empty field's placeholder).
-- Faster face repair on WAI v16: faces are repainted at 768 px unless they're bigger than that (close-ups keep
-  1024 px), as WAI-ANIMA already did: about 40 % less time for face repair (one face 4.5-5 s → ~3 s, two faces
-  ~10 s → ~6 s), the same look. Measured in docs/PERFORMANCE.md, round 8.
+  on every other step and reuses it in between, about 10 % faster per image with nearly the same picture. Also used
+  by the gallery's Upscale with detail pass. Measured in docs/PERFORMANCE.md, round 9.
+
+Gallery:
 - **Undo Move to Trash** (⌘Z, Edit → Undo): the image comes back from the Trash to its place in the gallery; ⇧⌘Z
   trashes it again.
 - **Copy Image** copies the PNG file instead of a 9 MB TIFF: pasting in Finder gives the PNG with its settings, other
   apps get the image. Also in the gallery's right-click menu and as Image → Copy Image (⇧⌘C).
 - Drag a gallery thumbnail to Finder or another app to drop the PNG file.
-- The seed field applies as you type: a seed typed right before Generate is used without pressing Return.
+- ← / → browse the gallery only in the main window, not while Settings is in front.
+
+Fixes:
+- The seed field applies as you type (a seed typed right before Generate is used without pressing Return) and no
+  longer shows "Random" next to a fixed seed.
 - Settings: choosing another Images folder shows its images right away; choosing another Models folder rereads the
   LoRAs and upscalers; the AI prompt server is saved as you type.
-- ← / → browse the gallery only in the main window, not while Settings is in front.
-- Small fixes: the Live preview tooltip was on the Step cache row; the sidebars count "5,094 characters" and
-  "16,006 styles" the same way; "Open data folder" (it also holds the style samples and the tag list).
+- The Live preview tooltip was on the Step cache row; the sidebars count "5,094 characters" and "16,006 styles" the
+  same way; "Open data folder" (it also holds the style samples and the tag list).
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.3.3" button in the
+toolbar). From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time,
+allow it in **System Settings → Privacy & Security → Open Anyway**.
 
 ## 0.3.2 (2026-11-22)
 
