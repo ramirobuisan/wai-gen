@@ -1,4 +1,5 @@
 import Foundation
+import WaiMLX
 
 /// Which pipeline runs a preset (both are MLX).
 enum EngineKind: String, Codable {
@@ -111,6 +112,10 @@ struct PresetDefaults: Equatable {
     var negative: String
     /// "Fast mode": fewer steps with a sampler that converges sooner (compared in docs/PERFORMANCE.md)
     var fast: FastSampling = .init(sampler: .dpmpp2m, scheduler: .karras, steps: 16)
+    /// What the SDXL UNet predicts; the checkpoint decides it, the card records it (epsilon checkpoints leave .epsilon)
+    var prediction: Prediction = .epsilon
+    /// CFG Rescale the model card recommends (0 = off). ComfyUI convention, blend fixed at 0.7 in the engine
+    var cfgRescale: Double = 0
 }
 
 struct FastSampling: Equatable {
@@ -192,6 +197,23 @@ enum ModelCatalog {
                 hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
                 qualityPrefix: "masterpiece, best quality, newest, absurdres, highres, safe", negative: noobaiNegative),
             source: "Hugging Face Laxhar/noobai-XL-1.1 (EPS): Euler a, 25-30 steps, CFG 5-6, ~1024² (832×1216 recommended)"),
+        ModelPreset(
+            // the V-Pred 1.0 release of the same base model: v-prediction + zero terminal SNR, which the engine
+            // detects from the checkpoint itself; Euler only, no Karras, CFG Rescale recommended
+            id: "noobai-xl-vpred-10", name: "NoobAI-XL V-Pred 1.0", engine: .sdxl,
+            checkpoint: "checkpoints/noobaiXLNAIXL_vPred10Version.safetensors",
+            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
+            defaults: PresetDefaults(
+                // Model card (Civitai 833294 v1190596): euler + normal ("Karras does not work"), CFG 4-5,
+                // 28-35 steps at 832x1216, CFG Rescale 0.7 on. Card quality prefix + NoobAI negative.
+                width: 832, height: 1216, steps: 28, cfg: 4.5, sampler: .euler, scheduler: .normal,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
+                qualityPrefix: "masterpiece, best quality, newest, absurdres, highres, safe", negative: noobaiNegative,
+                // fewer steps on Euler-a would drift on a v-pred schedule; keep plain Euler, just 20 steps
+                fast: .init(sampler: .euler, scheduler: .normal, steps: 20),
+                prediction: .v, cfgRescale: 0.7),
+            source: "Civitai 833294 v1190596 (V-Pred 1.0): Euler normal only (no Karras), 28-35 steps, CFG 4-5, "
+                + "832x1216, CFG Rescale ~0.7 recommended, zero terminal SNR"),
     ]
 
     static func preset(_ id: String) -> ModelPreset { presets.first { $0.id == id } ?? presets[0] }

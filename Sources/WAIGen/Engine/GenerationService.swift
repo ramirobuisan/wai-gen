@@ -368,6 +368,10 @@ final class GenerationService: @unchecked Sendable {
         }
         if job.stepCache { sp.stepCache = Self.stepCacheThreshold }
         sp.hiresGuidanceEvery = job.hiresGuidanceEvery
+        // preset-level recipe switches (NoobAI-XL V-Pred 1.0): v-prediction + the card's
+        // CFG Rescale; both stay off (epsilon / 0) for the EPS checkpoints
+        sp.prediction = job.preset.defaults.prediction
+        sp.cfgRescale = Float(job.preset.defaults.cfgRescale)
         return sp
     }
 
