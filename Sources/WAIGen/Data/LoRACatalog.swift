@@ -5,6 +5,8 @@ struct LoRAFile: Identifiable, Hashable {
     let relativePath: String     // inside models/loras
     let baseModel: String?       // e.g. "SDXL", "Illustrious", "Anima"
     let triggerTags: [String]    // most frequent training tags
+    /// a preview image next to the file (`<name>.preview.jpeg`, as ComfyUI's LoRA managers save them, or `<name>.png`)
+    var preview: URL? = nil
     var id: String { relativePath }
     var name: String { ((relativePath as NSString).lastPathComponent as NSString).deletingPathExtension }
 
@@ -38,9 +40,20 @@ enum LoRACatalog {
         for case let url as URL in e where url.pathExtension.lowercased() == "safetensors" {
             let rel = url.path.replacingOccurrences(of: root.path + "/", with: "")
             let meta = metadata(url)
-            out.append(LoRAFile(relativePath: rel, baseModel: baseModel(meta), triggerTags: topTags(meta)))
+            out.append(LoRAFile(relativePath: rel, baseModel: baseModel(meta), triggerTags: topTags(meta),
+                                preview: previewImage(for: url)))
         }
         return out.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    }
+
+    /// `x.safetensors` -> the first of x.preview.jpeg / .jpg / .png / .webp, x.jpeg / .jpg / .png / .webp that exists.
+    static func previewImage(for url: URL) -> URL? {
+        let base = url.deletingPathExtension().path
+        for suffix in [".preview.jpeg", ".preview.jpg", ".preview.png", ".preview.webp", ".jpeg", ".jpg", ".png", ".webp"] {
+            let candidate = URL(fileURLWithPath: base + suffix)
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
     }
 
     /// The "__metadata__" block of a safetensors header (no tensor data is read).

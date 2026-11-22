@@ -152,6 +152,9 @@ struct InspectorView: View {
                     let file = model.loraFiles.first { $0.relativePath == sel.relativePath }
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
+                            if let preview = file?.preview {
+                                LoRAThumbnail(url: preview, title: sel.name, subtitle: file?.baseModel)
+                            }
                             Toggle(isOn: $sel.enabled) { Text(sel.name).lineLimit(1).truncationMode(.middle) }
                                 .toggleStyle(.checkbox)
                             Spacer(minLength: 0)
@@ -379,6 +382,27 @@ struct CollapsibleSection<Content: View>: View {
             }
             .buttonStyle(.plain)
             .accessibilityHint(isExpanded ? "Collapses the section" : "Expands the section")
+        }
+    }
+}
+
+/// A LoRA's preview image in the inspector; hover it for the big version beside the sidebar.
+struct LoRAThumbnail: View {
+    let url: URL
+    let title: String
+    let subtitle: String?
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image { Image(nsImage: image).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) }
+        }
+        .frame(width: 26, height: 36)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .hoverPreview(image, id: "lora:" + url.path, title: title, subtitle: subtitle)
+        .task(id: url) {
+            let u = url
+            image = await Task.detached(priority: .utility) { NSImage(contentsOf: u) }.value
         }
     }
 }
