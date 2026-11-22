@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 (2026-11-22)
 
 - Fixed: **Step cache with Fast mode** (or with the Euler / DPM++ 2M samplers) made grainy or washed-out images: with
   samplers that don't add fresh noise every step the cache skipped about half of the model calls. The step cache now
   only applies with Euler a (the default); the inspector says when it's not used.
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.3.4" button in the
+toolbar). From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time,
+allow it in **System Settings → Privacy & Security → Open Anyway**.
 
 ## 0.3.3 (2026-11-22)
 
