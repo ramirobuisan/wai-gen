@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **NoobAI-XL V-Pred 1.0** as a fourth model (⌘4): put `noobaiXLNAIXL_vPred10Version.safetensors` (Civitai 833294)
+  in `models/checkpoints`. The SDXL engine now runs v-prediction checkpoints: it reads the checkpoint's own
+  `v_pred` / `ztsnr` markers, uses the zero-terminal-SNR noise schedule and applies CFG Rescale 0.7 against
+  oversaturation. The preset follows the model card: 832×1216, Euler, 28 steps, CFG 4.5, NoobAI's quality tags and
+  negative prompt. Faster hi-res guidance works on it (hi-res pass about 23 % shorter, same look); the Step cache
+  stays off because it needs Euler a. WAI v16 and NoobAI-XL 1.1 give the same images as before.
+
 ## 0.4.0 (2026-11-22)
 
 - **Faster by default**: Step cache and Faster hi-res guidance are now on by default, and switched on once in saved
