@@ -345,7 +345,7 @@ public final class WaiSDXL {
             final class Reuse { var direction: MLXArray?; var ratio: MLXArray?; var calls = 0 }
             let reuse = Reuse()
             return { x, sigma in
-                let cIn = prediction == .v ? 1 / (sigma * sigma + 1).squareRoot() : 1
+                let cIn = 1 / (sigma * sigma + 1).squareRoot()
                 let t = schedule.timestep(sigma)
                 let x1 = (x * cIn).asType(dtype)
                 let predict: () -> MLXArray = {
@@ -374,7 +374,7 @@ public final class WaiSDXL {
             }
         }
         return { x, sigma in
-            let cIn = prediction == .v ? 1 / (sigma * sigma + 1).squareRoot() : 1
+            let cIn = 1 / (sigma * sigma + 1).squareRoot()
             let t = schedule.timestep(sigma)
             let xIn = (concatenated([x, x], axis: 0) * cIn).asType(dtype)
             let timesteps = MLXArray([t, t])
