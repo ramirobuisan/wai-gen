@@ -55,3 +55,28 @@ Note: the Step cache only applies with Euler a (Sampler.supportsStepCache), so i
 guidance still applies.
 
 ## Log
+
+- Speed (M-series, 832×1216, 28 steps, Euler): v-pred runs at ~0.46-0.51 s/it, same as the
+  EPS presets; auto-detection (`v_pred` marker tensor in the safetensors header) picks `.v`
+  and prints it, no flag needed.
+- Regression (step 8): back-to-back runs of the old (`main`, worktree at /private/tmp/opencode/wai-main)
+  and new release binaries are bit-identical for WAI v16 (sha 8fbae83d…) and NoobAI-XL 1.1
+  (sha e90f3e5c…), seed 42, same prompt. A stray non-matching hash from an early old-run was a
+  cold-start artifact (first run after compile differs); re-running old-vs-new back-to-back matches.
+- V-Pred ckpt forced with `--prediction epsilon`: output is all-black (broken, as expected —
+  proves the switch matters). Default `.v`: clean image. `--cfg-rescale 0.7`: visibly softer,
+  more natural colors, less oversaturation — kept as the preset value.
+- Hi-res + face repair end-to-end on v-pred: `--hires 1.5 --hires-steps 15 --hires-denoise 0.4`
+  with RealESRGAN_x4plus_anime_6B + `--face-repair face_yolov8m` → 35.45 s total, 1248×1824 out,
+  no grey/blank artifacts; refine pass re-noise goes through the same zero-SNR schedule.
+- Implementation notes: c_in = 1/√(σ²+1) is applied to the sample before the model call for
+  *both* branches (ComfyUI's `x_input`); moving it was what initially broke EPS bit-exactness.
+  CFG Rescale works in model-output space before the eps/v→x0 conversion, fixed 0.7 blend
+  (ComfyUI convention), so `cfgRescale` acts as an on/off switch. Zero-SNR is a schedule-level
+  flag (`DiscreteSchedule(zeroTerminalSNR:)`, σ_max ≈ 4519, first step finite).
+- Preset wiring (step 9): `prediction`/`cfgRescale` live on `PresetDefaults` only, resolved from
+  `job.preset.defaults` inside `sdxlParameters(_:)` — not added to persisted `GenerationSettings`
+  and no new UI; sampler/scheduler/prefix/negative already propagate via `settings.apply(preset)`.
+  No job/CLI/remote plumbing needed (jobs carry the preset, remote sends its id).
+  Release build clean; app launches with the four presets. No release cut.
+
