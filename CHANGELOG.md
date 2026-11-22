@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (2026-11-22)
 
 - Delete the image you're looking at: a trash button beside Upscale / Info / Finder / Copy above the image, and
   **⌘⌫** (Image → Move to Trash). It goes to the Trash and the next image is selected. While you're typing in the
   prompt or a search field ⌘⌫ still deletes text there. An image waiting to be upscaled can't be deleted until it's done.
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.3.2" button in the
+toolbar). From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time,
+allow it in **System Settings → Privacy & Security → Open Anyway**.
 
 ## 0.3.1 (2026-11-20)
 
