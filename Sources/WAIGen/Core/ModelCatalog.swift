@@ -150,6 +150,9 @@ enum ModelCatalog {
         "bad quality, worst quality, worst detail, sketch, censor, watermark, signature, artist name, patreon username, patreon logo, web address, nsfw"
     static let animaNegative =
         "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, lowres, censor, watermark, signature, patreon username, patreon logo, web address, nsfw"
+    /// NoobAI-XL's recommended negative (Hugging Face Laxhar/noobai-XL-1.1)
+    static let noobaiNegative =
+        "nsfw, worst quality, old, early, low quality, lowres, signature, username, logo, bad hands, mutated hands, mammal, anthro, furry, ambiguous form, feral, semi-anthro"
     /// Earlier default negatives, upgraded to the current ones when found unchanged in saved settings.
     static let legacyNegatives: [String: String] = [
         "bad quality, worst quality, worst detail, sketch, censor, nsfw": waiNegative,
@@ -178,6 +181,17 @@ enum ModelCatalog {
                 // flow model: DPM++ 2M leaves blotches at 16 steps, plain Euler stays clean
                 fast: .init(sampler: .euler, scheduler: .normal, steps: 16)),
             source: "Civitai 2544636 v1.0: Euler a normal, 20-30 steps, CFG 4-5, hires ≤1.5x/20 steps/denoise 0.35-0.5"),
+        ModelPreset(
+            // epsilon-prediction SDXL (Illustrious-based), so the WAI v16 engine and its speed-ups apply as they are;
+            // the V-Pred versions need a different prediction type and schedule
+            id: "noobai-xl-11", name: "NoobAI-XL 1.1", engine: .sdxl,
+            checkpoint: "checkpoints/NoobAI-XL-v1.1.safetensors",
+            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
+            defaults: PresetDefaults(
+                width: 832, height: 1216, steps: 28, cfg: 5, sampler: .eulerA, scheduler: .normal,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
+                qualityPrefix: "masterpiece, best quality, newest, absurdres, highres, safe", negative: noobaiNegative),
+            source: "Hugging Face Laxhar/noobai-XL-1.1 (EPS): Euler a, 25-30 steps, CFG 5-6, ~1024² (832×1216 recommended)"),
     ]
 
     static func preset(_ id: String) -> ModelPreset { presets.first { $0.id == id } ?? presets[0] }
