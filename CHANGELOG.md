@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Delete the image you're looking at: a trash button beside Upscale / Info / Finder / Copy above the image, and
+  **⌘⌫** (Image → Move to Trash). It goes to the Trash and the next image is selected. While you're typing in the
+  prompt or a search field ⌘⌫ still deletes text there. An image waiting to be upscaled can't be deleted until it's done.
+
 ## 0.3.1 (2026-11-20)
 
 - Hover over a style's or a character's thumbnail to see it bigger: after a moment a card with the image, the name and

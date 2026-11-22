@@ -750,7 +750,23 @@ final class AppModel {
         if gallery[next] != selection { show(gallery[next]) }
     }
 
+    /// False while a queued or running upscale still needs the image's file.
+    func canTrash(_ item: GalleryItem) -> Bool {
+        !(pending + [running].compactMap { $0 }).contains { $0.upscale?.source == item.url }
+    }
+
+    /// Image → Move to Trash (⌘⌫). While text is being edited ⌘⌫ keeps its usual meaning there.
+    func trashSelectionOrDeleteText() {
+        // the window the keystroke went to (keyWindow is nil while the app isn't active)
+        if let text = (NSApp.currentEvent?.window ?? NSApp.keyWindow)?.firstResponder as? NSText {
+            text.doCommand(by: #selector(NSStandardKeyBindingResponding.deleteToBeginningOfLine(_:)))
+        } else if let selection {
+            moveToTrash(selection)
+        }
+    }
+
     func moveToTrash(_ item: GalleryItem) {
+        guard canTrash(item) else { return }
         do {
             try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
             let index = gallery.firstIndex(of: item) ?? 0

@@ -109,6 +109,11 @@ struct ImageStage: View {
                         }
                     } label: { Label("Copy Image", systemImage: "doc.on.doc").labelStyle(.iconOnly) }
                         .help("Copy image")
+                    Button { model.moveToTrash(item) } label: {
+                        Label("Move to Trash", systemImage: "trash").labelStyle(.iconOnly)
+                    }
+                    .help(model.canTrash(item) ? "Move to Trash (⌘⌫)" : "Waiting to be upscaled: can't move it to the Trash yet")
+                    .disabled(!model.canTrash(item))
                 }
                 .buttonStyle(.borderless)
                 .padding(6)
@@ -245,6 +250,7 @@ struct GalleryStrip: View {
                                 }
                                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
                                 Button("Move to Trash", role: .destructive) { model.moveToTrash(item) }
+                                    .disabled(!model.canTrash(item))
                             }
                     }
                 }

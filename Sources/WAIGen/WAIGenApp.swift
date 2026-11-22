@@ -90,9 +90,10 @@ struct WAIGenApp: App {
                 Divider()
                 Button("Show in Finder") { if let s = model.selection { NSWorkspace.shared.activateFileViewerSelecting([s.url]) } }
                     .disabled(model.selection == nil)
-                // no ⌘⌫ shortcut: it would fire while editing the prompt
-                Button("Move to Trash") { if let s = model.selection { model.moveToTrash(s) } }
-                    .disabled(model.selection == nil || model.isBusy)
+                // ⌘⌫ as in Finder; while the prompt or a field is being edited it deletes text there instead
+                Button("Move to Trash") { model.trashSelectionOrDeleteText() }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(!(model.selection.map(model.canTrash) ?? false))
             }
         }
 
