@@ -266,7 +266,7 @@ public final class WaiSDXL {
     /// Off: WAIGEN_COMPILE=0.
     public var compileUNet = ProcessInfo.processInfo.environment["WAIGEN_COMPILE"] != "0"
 
-    private lazy var compiledUNet: @Sendable ([MLXArray]) -> [MLXArray] = {
+    private lazy var compiledUNet: ([MLXArray]) -> [MLXArray] = {
         let unet = self.unet
         return compile(inputs: [unet], outputs: []) { a in
             [unet(a[0], timestep: a[1], encoderX: a[2], textTime: (a[3], a[4]))]

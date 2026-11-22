@@ -14,7 +14,7 @@ let package = Package(
         .executable(name: "WAIGen", targets: ["WAIGen"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.4")),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.33.0")),
     ],
     targets: [
         // Both pipelines in MLX: WAI-illustrious SDXL (WaiSDXL) and WAI-ANIMA (WaiAnima). SDXL model code (Clip, UNet, VAE, Tokenizer, Image, Configuration) is
