@@ -17,12 +17,20 @@ public enum SchedulerKind: String, CaseIterable, Codable, Sendable {
     case simple
 }
 
+/// What the UNet predicts each step. `.v` checkpoints (NoobAI-XL V-Pred 1.0) also need the
+/// zero-terminal-SNR schedule (`DiscreteSchedule(zeroTerminalSNR: true)`) and the v-prediction
+/// conversions in `WaiSDXL.denoiser`.
+public enum Prediction: String, Codable, CaseIterable, Sendable {
+    case epsilon
+    case v
+}
+
 /// The 1000-step discrete noise schedule of SD/SDXL (scaled_linear betas 0.00085 ... 0.012).
 struct DiscreteSchedule {
     let sigmas: [Float]       // index = training timestep 0 ... 999
     let logSigmas: [Float]
 
-    init(betaStart: Double = 0.00085, betaEnd: Double = 0.012, steps: Int = 1000) {
+    init(betaStart: Double = 0.00085, betaEnd: Double = 0.012, steps: Int = 1000, zeroTerminalSNR: Bool = false) {
         var acp = 1.0
         var s = [Float]()
         let a = betaStart.squareRoot()
@@ -31,6 +39,23 @@ struct DiscreteSchedule {
             let beta = pow(a + (b - a) * Double(i) / Double(steps - 1), 2)
             acp *= 1 - beta
             s.append(Float(((1 - acp) / acp).squareRoot()))
+        }
+        if zeroTerminalSNR {
+            // Comfy's rescale_zero_terminal_snr_sigmas (comfy/model_sampling.py): re-linearize the
+            // whole table so its last timestep reaches SNR 0, which v-prediction requires. On the
+            // 1000-step SDXL table this leaves sigma[0] = 0.0292 but raises sigma[999] to ~4519,
+            // so a `normal` schedule starts from a much larger initial sigma than the eps one
+            // (and the x/sqrt(sigma^2+1) input scaling keeps the model input well-scaled).
+            let barSqrt = s.map { (1 / ($0 * $0 + 1)).squareRoot() } // alphas_bar_sqrt
+            let first = barSqrt[0]
+            let last = barSqrt[barSqrt.count - 1]
+            s = barSqrt.indices.map { i in
+                if i == barSqrt.count - 1 {
+                    return (((1 - 4.8973451890853435e-08) / 4.8973451890853435e-08).squareRoot())
+                }
+                let ab = pow((barSqrt[i] - last) * (first / (first - last)), 2)
+                return ((1 - ab) / ab).squareRoot()
+            }
         }
         sigmas = s
         logSigmas = s.map { log($0) }
