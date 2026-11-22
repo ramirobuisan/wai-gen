@@ -9,7 +9,8 @@
 //          [--seed 42] [--hires 1.5 --hires-steps 15 --hires-denoise 0.4 --hires-upscaler <esrgan>]
 //          [--face-repair <face_yolov8m.safetensors> --face-strength 0.4 --face-size 768] [--step-cache 0.5]
 //          [--detail-only <image> --face-size 1024,768] (face repair only, sizes compared on the same faces)
-//          [--lora path[:strength]]... [--repeat N] [-o out.png]
+//          [--lora path[:strength]]... [--prediction epsilon|v] [--cfg-rescale 0.7] [--repeat N] [-o out.png]
+//          (--prediction defaults to what the checkpoint declares: NoobAI V-Pred ckpts carry v_pred/ztsnr keys)
 // Samplers: SDXL euler_ancestral | euler | dpmpp_2m (schedulers normal | karras | simple);
 //           WAI-ANIMA euler_a | euler | dpm++2m (schedulers discrete | karras | simple).
 
@@ -69,6 +70,8 @@ let hires = take("--hires").flatMap(Float.init)
 let hiresSteps = take("--hires-steps").flatMap(Int.init)
 let hiresDenoise = take("--hires-denoise").flatMap(Float.init)
 let hiresUpscalerPath = take("--hires-upscaler")   // ESRGAN model, e.g. RealESRGAN_x4plus_anime_6B.pth
+let predictionArg = take("--prediction")           // epsilon | v (default: what the checkpoint declares)
+let cfgRescaleArg = take("--cfg-rescale")          // 0...1, on/off switch for CFG Rescale (0.7 blend)
 var loraArgs = [String]()
 while let l = take("--lora") { loraArgs.append(l) }   // path[:strength], repeatable
 let loras: [LoRASpec] = loraArgs.map { a in
@@ -493,6 +496,12 @@ if let diffusionPath {
     // ---------------- WAI Illustrious through MLX
     guard let modelPath else { fail("--model (or --diffusion-model for Anima) is required") }
     var params = SDXLParameters(prompt: prompt)
+    // Prediction comes from the checkpoint's own declaration (v_pred/ztsnr keys),
+    // overridable with --prediction; wired once the engine is loaded below.
+    if let predictionArg, Prediction(rawValue: predictionArg) == nil {
+        fail("--prediction must be one of \(Prediction.allCases.map(\.rawValue))")
+    }
+    params.cfgRescale = cfgRescaleArg.flatMap(Float.init) ?? 0
     params.negativePrompt = negative
     if let width { params.width = width }
     if let height { params.height = height }
@@ -523,6 +532,8 @@ if let diffusionPath {
         fail("loading \(modelPath): \(error.localizedDescription)")
     }
     print(String(format: "loaded %@ in %.1fs", (modelPath as NSString).lastPathComponent, Date().timeIntervalSince(tLoad)))
+    // Checkpoint declaration is the source of truth; --prediction overrides.
+    params.prediction = predictionArg.flatMap { Prediction(rawValue: $0) } ?? engine.detectedPrediction
 
     if let benchUNet {
         let wh = benchUNet.split(separator: "x").compactMap { Int($0) }
