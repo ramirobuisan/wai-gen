@@ -23,8 +23,30 @@ public struct SDXLParameters: Sendable {
     /// Step cache threshold (see `StepCache`): skips model calls on steps that would barely change the
     /// prediction. nil = off; 0.5 skips ~8 of 28 steps with a nearly identical image (docs/PERFORMANCE.md).
     public var stepCache: Float? = nil
+    /// Guidance interval (Kynkäänniemi et al. 2024): classifier-free guidance only while
+    /// `guidanceSigmaMin < sigma <= guidanceSigmaMax`; the other steps run the UNet once on the prompt alone
+    /// (half the work). The defaults guide every step.
+    public var guidanceSigmaMin: Float = 0
+    public var guidanceSigmaMax: Float = .infinity
+    /// false = the hi-res pass runs without guidance (prompt only).
+    public var hiresGuidance = true
+    /// > 1: the hi-res pass computes guidance only on every n-th model call and reuses the last guidance
+    /// direction (cond − uncond) on the others, which run the UNet once (CFG caching, as in FasterCache).
+    public var hiresGuidanceEvery = 1
 
     public init(prompt: String) { self.prompt = prompt }
+
+    /// nil when every step is guided (the original graph), else which sigmas get guidance.
+    var guidanceRule: ((Float) -> Bool)? {
+        guard guidanceSigmaMin > 0 || guidanceSigmaMax.isFinite else { return nil }
+        let (lo, hi) = (guidanceSigmaMin, guidanceSigmaMax)
+        return { $0 > lo && $0 <= hi }
+    }
+
+    var hiresGuidanceRule: ((Float) -> Bool)? {
+        if !hiresGuidance { return { _ in false } }
+        return guidanceRule ?? (hiresGuidanceEvery > 1 ? { _ in true } : nil)
+    }
 }
 
 /// Timings of one generation, in seconds.
@@ -131,7 +153,8 @@ public final class WaiSDXL {
         let cache = p.stepCache.map { StepCache(threshold: $0, sigmas: sigmas) }
         guard var latent = sample(
             p.sampler,
-            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8, cache: cache),
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8, cache: cache,
+                              guided: p.guidanceRule),
             x: x, sigmas: sigmas, isCancelled: isCancelled, preview: stepPreview, progress: { progress(.sample, $0, $1) })
         else { throw WaiCancelled() }
         tm.skippedSteps += cache?.skipped ?? 0
@@ -230,7 +253,8 @@ public final class WaiSDXL {
         let cache = p.stepCache.map { StepCache(threshold: $0, sigmas: hs) }
         guard let latent = sample(
             p.sampler,
-            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: hw, height: hh, cache: cache),
+            denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: hw, height: hh, cache: cache,
+                              guided: p.hiresGuidanceRule, guidanceEvery: p.hiresGuidanceEvery),
             x: xh, sigmas: hs, isCancelled: isCancelled, preview: preview, progress: { progress(.hires, $0, $1) })
         else { throw WaiCancelled() }
         skipped = cache?.skipped ?? 0
@@ -270,8 +294,12 @@ public final class WaiSDXL {
 
     /// CFG denoiser around the UNet (eps prediction -> denoised latent).
     /// `cache`: EasyCache step skipping on the UNet output (see `StepCache`).
+    /// `guided`: which sigmas get classifier-free guidance (nil = all, the original graph); the others run the
+    /// UNet once on the prompt. With a rule the step cache works on the guided prediction, not the CFG pair.
+    /// `guidanceEvery` > 1: guidance is computed on every n-th guided call; the calls between run the UNet on
+    /// the prompt alone and add the last guidance direction: eps_c + (cfg − 1)(eps_c − eps_u)_last.
     func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int,
-                  cache: StepCache? = nil) -> Denoiser {
+                  cache: StepCache? = nil, guided: ((Float) -> Bool)? = nil, guidanceEvery: Int = 1) -> Denoiser {
         let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
             .reshaped(1, 6)
         let textTime = (pooled, tiled(ids, repetitions: [2, 1]).asType(dtype))
@@ -279,6 +307,37 @@ public final class WaiSDXL {
         let schedule = self.schedule
         let dtype = self.dtype
         let compiled = compileUNet ? compiledUNet : nil
+        if let guided {
+            let condContext = context[0 ..< 1]
+            let condText = (textTime.0[0 ..< 1], textTime.1[0 ..< 1])
+            final class Reuse { var direction: MLXArray?; var calls = 0 }
+            let reuse = Reuse()
+            return { x, sigma in
+                let cIn = 1 / (sigma * sigma + 1).squareRoot()
+                let t = schedule.timestep(sigma)
+                let x1 = (x * cIn).asType(dtype)
+                let predict: () -> MLXArray = {
+                    let wantsGuidance = guided(sigma)
+                    defer { if wantsGuidance { reuse.calls += 1 } }
+                    if wantsGuidance, reuse.direction == nil || reuse.calls % max(guidanceEvery, 1) == 0 {
+                        let xIn = concatenated([x1, x1], axis: 0)
+                        let timesteps = MLXArray([t, t])
+                        let eps = compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
+                            ?? unet(xIn, timestep: timesteps, encoderX: context, textTime: textTime)
+                        let (epsC, epsU) = eps.split()
+                        if guidanceEvery > 1 { reuse.direction = epsC - epsU }
+                        return epsU + cfg * (epsC - epsU)
+                    }
+                    let timesteps = MLXArray([t])
+                    let epsC = compiled.map { $0([x1, timesteps, condContext, condText.0, condText.1])[0] }
+                        ?? unet(x1, timestep: timesteps, encoderX: condContext, textTime: condText)
+                    if wantsGuidance, let direction = reuse.direction { return epsC + (cfg - 1) * direction }
+                    return epsC
+                }
+                let e = (cache.map { $0(x1.asType(.float32), sigma: sigma, compute: predict) } ?? predict()).asType(x.dtype)
+                return x - sigma * e
+            }
+        }
         return { x, sigma in
             let cIn = 1 / (sigma * sigma + 1).squareRoot()
             let t = schedule.timestep(sigma)

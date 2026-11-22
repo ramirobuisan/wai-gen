@@ -37,6 +37,8 @@ struct GenerationSettings: Codable, Equatable {
     var fastMode = false
     /// skip model calls on steps that would barely change the image (EasyCache, see docs/PERFORMANCE.md)
     var stepCache = false
+    /// WAI v16: compute the guidance on every other hi-res step and reuse it in between (docs/PERFORMANCE.md, round 9)
+    var fastHiresGuidance = false
 
     /// Hi-res upscaler model in models/upscale_models ("" = built-in bicubic / Lanczos).
     var hiresUpscaler = "RealESRGAN_x4plus_anime_6B.pth"

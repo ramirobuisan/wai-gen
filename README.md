@@ -32,6 +32,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - LoRAs for both engines (merged into the MLX models), with a warning when a LoRA was made for the other model family
 - Fast mode: a quicker sampler with fewer steps (~30 % faster, slightly different look)
 - Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-30 % faster, nearly the same image)
+- Faster hi-res guidance (WAI v16): guidance on every other hi-res step, reused in between (~10 % faster, nearly the same image)
 - Live preview of every step (latent projection, no extra time)
 - Gallery: upscale with a detail pass or upscaler-only ×2, reuse prompt/settings/seed, info, ← / → to browse,
   ⌘⌫ or the trash button to move an image to the Trash (⌘Z puts it back), Copy Image (⇧⌘C) copies the PNG,

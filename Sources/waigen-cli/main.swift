@@ -79,6 +79,10 @@ let loras: [LoRASpec] = loraArgs.map { a in
 }
 let loraSelfTest = take("--lora-selftest")         // SDXL: generate with / without a LoRA and compare
 let stepCacheThreshold = take("--step-cache").flatMap(Float.init)   // EasyCache threshold (0.5 in the app)
+// WAI v16: guidance only while lo < sigma <= hi ("0.28,5.42"; "0,inf" = every step) and/or none in the hi-res pass
+let guidanceInterval = take("--guidance-interval").map { $0.split(separator: ",").compactMap { Float(String($0)) } }
+let hiresNoGuidance = flag("--hires-no-guidance")
+let hiresGuidanceEvery = take("--hires-guidance-every").flatMap(Int.init)   // 2 = guidance every other hi-res call
 let previewDir = take("--preview-dir")            // save every step's live preview here
 let refinePath = take("--refine")                 // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
@@ -503,6 +507,12 @@ if let diffusionPath {
     if let hiresSteps { params.hiresSteps = hiresSteps }
     params.stepCache = stepCacheThreshold
     if let hiresDenoise { params.hiresDenoise = hiresDenoise }
+    if let g = guidanceInterval {
+        guard g.count == 2 else { fail("--guidance-interval lo,hi") }
+        (params.guidanceSigmaMin, params.guidanceSigmaMax) = (g[0], g[1])
+    }
+    params.hiresGuidance = !hiresNoGuidance
+    if let hiresGuidanceEvery { params.hiresGuidanceEvery = hiresGuidanceEvery }
 
     let tLoad = Date()
     let engine: WaiSDXL

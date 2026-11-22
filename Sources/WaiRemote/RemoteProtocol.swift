@@ -103,6 +103,8 @@ public struct RemoteJob: Codable, Sendable {
     public var livePreview: Bool
     public var stepCache: Bool
     public var upscale: Upscale?
+    /// WAI v16 hi-res guidance on every n-th step (nil from older versions = every step)
+    public var hiresGuidanceEvery: Int? = nil
 
     public struct Hires: Codable, Sendable {
         public var scale: Double, steps: Int, denoise: Double

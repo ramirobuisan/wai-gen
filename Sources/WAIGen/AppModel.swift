@@ -469,7 +469,8 @@ final class AppModel {
                     : nil,
                 loras: jobLoRAs,
                 hiresUpscaler: upscalerURL,
-                livePreview: s.livePreview, stepCache: s.stepCache, artists: s.artists)
+                livePreview: s.livePreview, stepCache: s.stepCache, artists: s.artists,
+                hiresGuidanceEvery: s.fastHiresGuidance && preset.engine == .sdxl ? 2 : 1)
             pending.append(job)
         }
         processNext()
@@ -544,7 +545,8 @@ final class AppModel {
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
             loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview, stepCache: s.stepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
-            artists: r.map { $0.artists ?? [] } ?? s.artists)
+            artists: r.map { $0.artists ?? [] } ?? s.artists,
+            hiresGuidanceEvery: detail && s.fastHiresGuidance && p.engine == .sdxl ? 2 : 1)
         pending.append(job)
         processNext()
     }
@@ -660,6 +662,9 @@ final class AppModel {
             loras: job.loras.isEmpty ? nil : job.loras.map { LoRARecord(path: $0.relativePath, strength: $0.strength) },
             hiresUpscaler: job.hires == nil ? nil : (job.hiresUpscaler?.lastPathComponent ?? "built-in"))
         if job.stepCache { record.stepCache = true }
+        if job.hiresGuidanceEvery > 1, job.hires != nil || job.upscale?.detailPass == true {
+            record.hiresGuidanceEvery = job.hiresGuidanceEvery
+        }
         if !job.artists.isEmpty { record.artists = job.artists }
         if let up = job.upscale {
             record.upscaledFrom = up.source.lastPathComponent
@@ -761,6 +766,7 @@ final class AppModel {
             settings.loras = []
         }
         settings.stepCache = record.stepCache == true
+        settings.fastHiresGuidance = (record.hiresGuidanceEvery ?? 1) > 1
         if seed { settings.seed = record.seed }
     }
 

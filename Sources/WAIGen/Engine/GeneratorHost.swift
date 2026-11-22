@@ -85,6 +85,7 @@ final class GeneratorHost: RemoteJobHandler, @unchecked Sendable {
             faceRepair: r.faceRepair.map { FaceRepairOptions(strength: $0.strength, confidence: $0.confidence, prompt: $0.prompt) },
             loras: loras, hiresUpscaler: upscaler, livePreview: r.livePreview, stepCache: r.stepCache, upscale: upscale)
         job.id = id
+        job.hiresGuidanceEvery = min(max(r.hiresGuidanceEvery ?? 1, 1), 4)
 
         setBusy(true)
         defer { setBusy(false) }
@@ -147,7 +148,7 @@ final class GeneratorHost: RemoteJobHandler, @unchecked Sendable {
 extension GenerationJob {
     /// This job for another Mac's generator (file references by name, a gallery Upscale's source image inlined).
     func remote() throws -> RemoteJob {
-        RemoteJob(
+        var job = RemoteJob(
             presetID: preset.id, positive: positive, negative: negative, characters: characters, userPrompt: userPrompt,
             width: width, height: height, steps: steps, cfg: cfg, sampler: sampler.rawValue, scheduler: scheduler.rawValue,
             seed: seed, hires: hires.map { .init(scale: $0.scale, steps: $0.steps, denoise: $0.denoise) },
@@ -156,5 +157,7 @@ extension GenerationJob {
             hiresUpscaler: hiresUpscaler?.lastPathComponent, livePreview: livePreview, stepCache: stepCache,
             upscale: try upscale.map { .init(width: $0.width, height: $0.height, detailPass: $0.detailPass,
                                              source: try Data(contentsOf: $0.source)) })
+        if hiresGuidanceEvery > 1 { job.hiresGuidanceEvery = hiresGuidanceEvery }
+        return job
     }
 }

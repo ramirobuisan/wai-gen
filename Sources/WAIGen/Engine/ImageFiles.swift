@@ -35,6 +35,8 @@ struct GenerationRecord: Codable, Hashable {
     var upscaleDetailPass: Bool? = nil
     /// true when made with the step cache (EasyCache) on
     var stepCache: Bool? = nil
+    /// 2 when the hi-res pass computed the guidance on every other step ("Faster hi-res guidance")
+    var hiresGuidanceEvery: Int? = nil
     /// artist styles picked in the sidebar (their tags are in `positive`)
     var artists: [String]? = nil
 
@@ -56,6 +58,7 @@ struct GenerationRecord: Codable, Hashable {
             if let fp = faceRepairPrompt { s += ", ADetailer prompt: \"\(fp.replacingOccurrences(of: "\"", with: "\\\""))\"" }
         }
         if stepCache == true { s += ", Step cache: EasyCache" }
+        if let n = hiresGuidanceEvery, n > 1 { s += ", Hires guidance: every \(n) steps" }
         if let src = upscaledFrom { s += ", Upscaled from: \(src)\(upscaleDetailPass == false ? " (upscaler only)" : "")" }
         s += ", Engine: \(engine), Version: WAI Gen"
         return s

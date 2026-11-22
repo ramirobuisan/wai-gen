@@ -440,6 +440,51 @@ image with one face and ~4 s with two, of a ~30 s image.
 
 ![WAI v16 face repair: before / 1024 px / 768 px](images/face-size-wai-v16.jpg)
 
+## Round 9 (2026-11-22): less classifier-free guidance in the hi-res pass (WAI v16)
+
+Every guided step runs the UNet twice (prompt and negative, as one batch of 2). Kynkäänniemi et al. (NeurIPS 2024,
+"Applying Guidance in a Limited Interval") and Adaptive Guidance (Castillo et al., AAAI 2025) found guidance largely
+unnecessary at low noise. WAI v16's hi-res pass (denoise 0.4, 15 steps) only covers σ 1.12 → 0.03, the low-noise
+end, so it was the obvious place to try. `WaiSDXL` got `guidanceSigmaMin/Max`, `hiresGuidance` and
+`hiresGuidanceEvery` (all off by default: the original graph); the CLI flags are `--guidance-interval lo,hi`,
+`--hires-no-guidance` and `--hires-guidance-every 2`. With any of them the step cache works on the guided
+prediction instead of the CFG pair.
+
+Three seeds, 1024×1344 → 1.5× hi-res with RealESRGAN, Step cache on, back to back (the Mac got slower as the runs
+went on, so compare within a seed):
+
+| Variant | Guided steps (base / hi-res) | Seed 101 | 202 | 303 | Look |
+|---|---|---|---|---|---|
+| now | 28 / 15 | 27.8 s | 31.1 s | 37.2 s | |
+| V1: no guidance in hi-res | 28 / 0 | **23.4 s** | **24.3 s** | **29.3 s** | same picture (27-29 dB), but at 100 % blush hatching and iris highlights soften |
+| V2: none below σ 0.5 | 23 / 8 | 28.6 s | 29.9 s | 33.5 s | small details change (white sneakers) |
+| V3: interval (0.28, 5.42] | 20 / 12 | 28.7 s | 33.9 s | 33.7 s | **different images** (outfits, hair colour): WAI needs early guidance to follow the prompt |
+
+V2 and V3 paid for extra `MLX.compile` traces (batch 1 next to batch 2) in each fresh CLI process.
+
+![now / V1 / V2 / V3](images/guidance-variants-wai-v16.jpg)
+
+**Every other step (kept, opt-in).** On every second guided call the hi-res pass runs the pair, keeps the
+guidance direction `eps_c − eps_u`, and on the calls between runs the UNet once on the prompt and adds the last
+direction: `eps_c + (cfg − 1)·(eps_c − eps_u)_last` (CFG caching, as in FasterCache). Measured warm (a warm-up
+image of another seed first in the same process, as the app keeps its traces):
+
+| Seed | now | every other step | V1 |
+|---|---|---|---|
+| 101 | 31.0 s (hi-res 18.6 s) | **28.2 s (14.9 s), −9 %** | 26.2 s (12.6 s) |
+| 202 | 39.9 s (24.1 s) | **35.2 s (19.2 s), −12 %** | 29.8 s (13.8 s) |
+| 303 | 37.3 s (22.1 s) | **32.6 s (17.6 s), −13 %** | 28.3 s (13.3 s) |
+
+Every other step stays 33-38 dB from the current image and keeps the fine linework V1 loses (the same image run
+twice: 99 dB, so the pipeline is deterministic). The app's image with the setting on is bit-identical to the CLI's.
+
+![now / every other step / V1 / now again, 100 % crops](images/guidance-every-other-wai-v16.jpg)
+
+In the app this is **Faster hi-res guidance** (inspector ▸ Hi-res fix, WAI v16 only, off by default like Fast mode
+and Step cache); it also applies to the gallery's Upscale with detail pass. Images made with it say
+`Hires guidance: every 2 steps` in their parameters and "Use Prompt and Settings" restores it. WAI-ANIMA wasn't
+tried yet (its CFG passes run separately, so the same trick would also save one pass per reused step).
+
 ## Possible next steps
 
 - Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.

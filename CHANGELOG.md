@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Faster hi-res guidance** (inspector ▸ Hi-res fix, WAI v16, off by default): the hi-res pass computes the guidance
+  on every other step and reuses it in between, about 10 % faster per image with nearly the same picture (measured
+  in docs/PERFORMANCE.md, round 9). Also used by the gallery's Upscale with detail pass.
+- The seed field no longer shows "Random" next to a fixed seed (it's only the empty field's placeholder).
 - Faster face repair on WAI v16: faces are repainted at 768 px unless they're bigger than that (close-ups keep
   1024 px), as WAI-ANIMA already did: about 40 % less time for face repair (one face 4.5-5 s → ~3 s, two faces
   ~10 s → ~6 s), the same look. Measured in docs/PERFORMANCE.md, round 8.

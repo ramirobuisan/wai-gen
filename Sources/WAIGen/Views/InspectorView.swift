@@ -118,6 +118,14 @@ struct InspectorView: View {
                     SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.hiresSteps) }, set: { model.settings.hiresSteps = Int($0) }),
                               range: 5 ... 40, step: 1, format: "%.0f")
                     SliderRow(title: "Denoise", value: $model.settings.hiresDenoise, range: 0.1 ... 0.8, step: 0.05, format: "%.2f")
+                    if preset.engine == .sdxl {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Toggle("Faster hi-res guidance", isOn: $model.settings.fastHiresGuidance)
+                            Text("Computes the guidance on every other hi-res step and reuses it in between: about 10 % faster per image, nearly the same image")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .help("Also used by the gallery's Upscale with detail pass. WAI v16 only.")
+                    }
                     Picker("Upscaler", selection: $model.settings.hiresUpscaler) {
                         Text(preset.engine == .sdxl ? "Built-in (bicubic)" : "Built-in (high-quality resize)").tag("")
                         ForEach(model.upscalerFiles, id: \.name) { f in
@@ -268,7 +276,9 @@ struct SeedRow: View {
         HStack {
             Text("Seed")
             Spacer()
-            TextField("Random", text: $text)
+            // in a Form the title shows as a label: hide it, "Random" is only the empty field's placeholder
+            TextField("Seed", text: $text, prompt: Text("Random"))
+                .labelsHidden()
                 .multilineTextAlignment(.trailing)
                 .frame(maxWidth: 110)
                 // applies as you type (Generate right after typing uses it); empty = random

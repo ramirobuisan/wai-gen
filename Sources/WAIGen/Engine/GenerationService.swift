@@ -52,6 +52,8 @@ struct GenerationJob: Identifiable, Sendable {
     var upscale: UpscaleRequest? = nil
     /// artist styles (already in `positive`; kept for the image's record)
     var artists: [String] = []
+    /// WAI v16 hi-res / detail pass: guidance on every n-th step, reused in between (1 = every step)
+    var hiresGuidanceEvery = 1
 }
 
 enum JobProgress: Sendable {
@@ -365,6 +367,7 @@ final class GenerationService: @unchecked Sendable {
             sp.hiresDenoise = Float(h.denoise)
         }
         if job.stepCache { sp.stepCache = Self.stepCacheThreshold }
+        sp.hiresGuidanceEvery = job.hiresGuidanceEvery
         return sp
     }
 
