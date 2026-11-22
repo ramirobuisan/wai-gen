@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-22)
 
 - **Faster by default**: Step cache and Faster hi-res guidance are now on by default, and switched on once in saved
   settings. A test that added every speed-up one at a time on top of the others found this the fastest combination
@@ -19,6 +19,11 @@
   step and reuses it in between, about 10-20 % faster per image (hi-res pass ~20 % shorter) with the same look
   (WAI v16 keeps every 2nd step).
   Measured in docs/PERFORMANCE.md, round 10.
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.4.0" button in the
+toolbar). From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time,
+allow it in **System Settings → Privacy & Security → Open Anyway**. NoobAI-XL needs its checkpoint in
+`models/checkpoints` (see the README).
 
 ## 0.3.4 (2026-11-22)
 
