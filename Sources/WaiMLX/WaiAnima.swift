@@ -396,9 +396,4 @@ extension WaiAnima {
             return out.asArray(UInt8.self)
         }
     }
-
-    /// Repaint size for WAI-ANIMA faces: 768 px unless a face crop is bigger (docs/PERFORMANCE.md, round 4).
-    public static func faceRepaintSize(_ faces: [FaceBox], settings: FaceRepairSettings) -> Int {
-        FaceRepairGeometry.largestCrop(faces, settings: settings) > 768 ? 1024 : 768
-    }
 }

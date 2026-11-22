@@ -82,6 +82,13 @@ public enum FaceRepairGeometry {
     public static func largestCrop(_ faces: [FaceBox], settings s: FaceRepairSettings) -> Int {
         faces.map { Int((max($0.x2 - $0.x1, $0.y2 - $0.y1)).rounded(.up)) + s.dilate + 2 * s.padding }.max() ?? 0
     }
+
+    /// Repaint size for both models: 768 px unless a face crop is bigger (close-ups keep 1024 px), so the
+    /// repaint is still at least the size it's pasted back at. About 40 % faster than 1024 px with the same look
+    /// (docs/PERFORMANCE.md, rounds 4 and 8).
+    public static func repaintSize(_ faces: [FaceBox], settings: FaceRepairSettings) -> Int {
+        largestCrop(faces, settings: settings) > 768 ? 1024 : 768
+    }
 }
 
 extension WaiSDXL {

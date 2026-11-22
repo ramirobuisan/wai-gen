@@ -8,7 +8,7 @@ Apple M5 Max (128 GB), Release builds, unless noted. "Warm" = models already loa
 | Job | Time | Biggest part |
 |---|---|---|
 | WAI v16, 1024×1344, 28 steps | ~15-17 s | UNet sampling, ~0.6 s/step (MLX) |
-| WAI v16 face repair (one face) | ~6 s (was 17.3 s) | 11 masked steps at 1024×1024 (MLX) |
+| WAI v16 face repair (one face) | ~3 s (was 17.3 s, then ~5 s) | 11 masked steps at 768×768 unless the face is bigger (MLX) |
 | WAI v16, 1024×1344 → 1536×2016 hi-res + face repair, in the app, Step cache on | **31.6 s** | UNet sampling |
 | WAI-ANIMA, 1024×1344 → 1536×2016 hi-res + face repair, in the app, Step cache on | **76 s** (157 s before round 4, 750 s originally) | the Anima model in MLX: 1.36 s/step at 1024×1344 |
 | WAI-ANIMA face repair (one face) | ~5-9 s (was ~16 s) | 10 masked steps at 768×768 |
@@ -287,8 +287,7 @@ Fewer steps looked similar on this face too, but the job's step count is kept so
 what it did before. The app now detects the faces first and repaints at **768 px unless a face crop is larger than that**
 (close-ups keep 1024 px, so no detail is lost when the crop is pasted back), with the step cache when it's
 on: 5.1 s in the app test above. Images without a face skip the pass entirely. (Round 5 removed the second
-detection this needed.) WAI v16's MLX face repair
-(6 s) keeps 1024 px.
+detection this needed.) WAI v16's MLX face repair kept 1024 px until round 8.
 
 ### Small: fp16 instead of bf16 for the MLX Anima model
 
@@ -419,6 +418,27 @@ VAE size (a 9× copy over 2^31 elements), so it isn't used.
 off / on (the Mac warming up between runs, which works against "on"): 16.22 / 16.48 → **14.46 / 14.90 s**,
 17.00 / 17.61 → **16.10 / 16.42 s**, 19.02 / 19.72 → **18.03 / 18.01 s**: **6-10 % per image**. Same picture
 (27.7 dB, Euler a amplifying the different rounding).
+
+## Round 8 (2026-11-22): the 768 px face rule for WAI v16 too
+
+Round 4's rule (repaint at 768 px unless a face crop is bigger) now applies to WAI v16's MLX face repair as well.
+`waigen-cli --detail-only <image> --face-size 1024,768 --repeat 3` repaints the same faces at both sizes, same seed.
+Three WAI v16 images at 1536×2016 (1.5× hi-res with RealESRGAN, Step cache on), strength 0.4, 11 masked steps,
+the face pass without the step cache:
+
+| Image | Faces (largest crop) | 1024 px | 768 px |
+|---|---|---|---|
+| cowboy shot | 1 (537 px) | 4.33 / 4.53 / 4.84 s | **2.87 / 2.90 / 2.92 s (−36 %)** |
+| same, 768 px run first | | 5.14 / 5.13 / 5.20 s | 2.92 / 2.95 / 3.02 s |
+| two girls, full body | 2 (335 px) | 9.82 / 9.90 / 9.99 s | **5.86 / 5.78 / 5.82 s (−41 %)** |
+| close-up | 1 (1447 px) | 4.87-5.06 s | (the rule keeps 1024 px) |
+
+The faces look the same at 100 %: 768 vs 1024 px is 23.0 / 25.7 dB over the repainted area, as far apart as each is
+from the face before repair (Euler a noise, not lost detail). The crop is pasted back at ≤ 768 px, so a 768 px
+repaint is still downscaled. In the app, the cowboy shot's face pass took 3.5 s with detection. That's ~1.7 s per
+image with one face and ~4 s with two, of a ~30 s image.
+
+![WAI v16 face repair: before / 1024 px / 768 px](images/face-size-wai-v16.jpg)
 
 ## Possible next steps
 

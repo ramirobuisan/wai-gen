@@ -54,7 +54,7 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 | WAI-ANIMA VAE decode / encode, 1536×2016 | **0.68 s / 0.59 s** | ~135 s / ~85 s |
 | RealESRGAN x4plus anime 6B, 1024×1344 → 4096×5376 | **1.97 s** (MLX) | 27.5 s (stable-diffusion.cpp) |
 | WAI-ANIMA model, 1024×1344, per step | **1.36 s** (MLX) | 2.72 s (stable-diffusion.cpp) |
-| WAI v16 face repair, one face | **~6 s** (MLX) | 17.3 s (stable-diffusion.cpp) |
+| WAI v16 face repair, one face | **~3 s** (MLX, 768 px for faces up to that size) | 17.3 s (stable-diffusion.cpp) |
 | WAI v16 1024×1344 → 1536×2016, hi-res + face repair, in the app, Step cache on | **31.6 s** | |
 | WAI-ANIMA face repair, one face | **~5-9 s** (768 px repaint) | ~16 s at 1024 px |
 | Face detector (YOLOv8m), warm | **0.011 s** (MLX) | 0.068-0.27 s (stable-diffusion.cpp) |

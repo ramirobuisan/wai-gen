@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Faster face repair on WAI v16: faces are repainted at 768 px unless they're bigger than that (close-ups keep
+  1024 px), as WAI-ANIMA already did: about 40 % less time for face repair (one face 4.5-5 s → ~3 s, two faces
+  ~10 s → ~6 s), the same look. Measured in docs/PERFORMANCE.md, round 8.
 - **Undo Move to Trash** (⌘Z, Edit → Undo): the image comes back from the Trash to its place in the gallery; ⇧⌘Z
   trashes it again.
 - **Copy Image** copies the PNG file instead of a 9 MB TIFF: pasting in Finder gives the PNG with its settings, other

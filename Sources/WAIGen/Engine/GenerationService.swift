@@ -507,6 +507,8 @@ final class GenerationService: @unchecked Sendable {
         guard !faces.isEmpty else { return (image, Date().timeIntervalSince(tf)) }
         var settings = FaceRepairSettings()
         settings.strength = Float(fr.strength)
+        // 768 px repaints unless a face crop is bigger (close-ups): ~40 % faster than 1024 px, same look
+        settings.inpaintSize = FaceRepairGeometry.repaintSize(faces, settings: settings)
         let faceProgress: (Int, Int, Int) -> Void = { _, step, total in progress(.faceRepair(step: step, total: total)) }
         let fixed: Data
         switch job.preset.engine {
@@ -518,11 +520,9 @@ final class GenerationService: @unchecked Sendable {
             fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
                                            settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
         case .anima:
-            // 768 px repaints unless a face crop is bigger (close-ups): half the time of 1024 px, same look
             let engine = try loadAnima(job.preset, job.modelsRoot)
             var p = animaParameters(job)
             if !fr.prompt.isEmpty { p.prompt = fr.prompt }
-            settings.inpaintSize = WaiAnima.faceRepaintSize(faces, settings: settings)
             fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
                                            settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
         }

@@ -7,7 +7,8 @@
 //              --vae <qwen_image_vae.safetensors> --prompt "..." [options]
 // Options: [--negative "..."] [-W 1024] [-H 1344] [--steps 28] [--cfg 6] [--sampler ...] [--scheduler ...]
 //          [--seed 42] [--hires 1.5 --hires-steps 15 --hires-denoise 0.4 --hires-upscaler <esrgan>]
-//          [--face-repair <face_yolov8m.safetensors> --face-strength 0.4] [--step-cache 0.5]
+//          [--face-repair <face_yolov8m.safetensors> --face-strength 0.4 --face-size 768] [--step-cache 0.5]
+//          [--detail-only <image> --face-size 1024,768] (face repair only, sizes compared on the same faces)
 //          [--lora path[:strength]]... [--repeat N] [-o out.png]
 // Samplers: SDXL euler_ancestral | euler | dpmpp_2m (schedulers normal | karras | simple);
 //           WAI-ANIMA euler_a | euler | dpm++2m (schedulers discrete | karras | simple).
@@ -82,10 +83,12 @@ let previewDir = take("--preview-dir")            // save every step's live prev
 let refinePath = take("--refine")                 // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
 let img2imgPath = take("--img2img")               // WAI-ANIMA: img2img from this image at --hires-denoise
-let detailOnly = take("--detail-only")            // WAI-ANIMA: only the face repair, on this image
+let detailOnly = take("--detail-only")            // only the face repair, on this image
 let faceDetector = take("--face-repair")          // path to face_yolov8m.safetensors
 let faceStrength = take("--face-strength").flatMap(Float.init) ?? 0.4
-let faceSize = take("--face-size").flatMap(Int.init)     // WAI-ANIMA face repaint size (default: the app's 768/1024 rule)
+// face repaint size (default: the app's rule); WAI v16 --detail-only takes a list (1024,768) to compare sizes
+let faceSizes = take("--face-size").map { $0.split(separator: ",").compactMap { Int($0) } } ?? []
+let faceSize = faceSizes.first
 let faceSteps = take("--face-steps").flatMap(Int.init)   // WAI-ANIMA face repair schedule length (default --steps)
 let detectPath = take("--detect")                 // print the faces found in these images (comma-separated) and the time
 let benchUNet = take("--bench-unet")              // WxH: SDXL UNet s/step, batch 1 vs 2, compile off/on
@@ -464,7 +467,7 @@ if let diffusionPath {
                 let faces = detector.detect(rgb: img.pixels, width: img.width, height: img.height)
                 var settings = FaceRepairSettings()
                 settings.strength = faceStrength
-                settings.inpaintSize = faceSize ?? WaiAnima.faceRepaintSize(faces, settings: settings)
+                settings.inpaintSize = faceSize ?? FaceRepairGeometry.repaintSize(faces, settings: settings)
                 var fp = p
                 if let faceSteps { fp.steps = faceSteps }
                 let fixed = try anima.repairFaces(rgb: img.pixels, width: img.width, height: img.height, faces: faces, fp,
@@ -575,6 +578,40 @@ if let diffusionPath {
     let detector = faceDetector.flatMap { try? YOLOFaceDetector(url: URL(fileURLWithPath: $0)) }
     if faceDetector != nil, detector == nil { fail("couldn't load the face detector") }
 
+    // only the face repair on an existing image; each --face-size in turn on the same faces, --repeat times each
+    // (the first run at a size includes tracing it), saving <output>_<size>.png
+    if let detailOnly {
+        guard let detector else { fail("--detail-only needs --face-repair <detector.safetensors>") }
+        guard let src = RGBImage.load(URL(fileURLWithPath: detailOnly)) else { fail("couldn't read \(detailOnly)") }
+        let faces = detector.detect(rgb: src.pixels, width: src.width, height: src.height)
+        var base = FaceRepairSettings()
+        base.strength = faceStrength
+        print(String(format: "%@ %dx%d: %d face(s), largest crop %d px (the app's 768/1024 rule: %d)",
+                     (detailOnly as NSString).lastPathComponent, src.width, src.height, faces.count,
+                     FaceRepairGeometry.largestCrop(faces, settings: base), FaceRepairGeometry.repaintSize(faces, settings: base)))
+        do {
+            for size in faceSizes.isEmpty ? [base.inpaintSize] : faceSizes {
+                var settings = base
+                settings.inpaintSize = size
+                for run in 1 ... repeats {
+                    var p = params
+                    p.seed = seed
+                    let t = Date()
+                    let fixed = try engine.repairFaces(rgb: src.pixels, width: src.width, height: src.height, faces: faces, p,
+                                                       settings: settings) { _, done, total in showProgress("face", done, total) }
+                    let secs = Date().timeIntervalSince(t)
+                    FileHandle.standardError.write(Data("\n".utf8))
+                    if run == 1 {
+                        let url = URL(fileURLWithPath: "\((output as NSString).deletingPathExtension)_\(size).png")
+                        try Image(MLXArray(fixed, [src.height, src.width, 3], type: UInt8.self)).save(url: url)
+                    }
+                    print(String(format: "face repair %d px, run %d: %.2fs", size, run, secs))
+                }
+            }
+        } catch { fail(error.localizedDescription) }
+        finish(0)
+    }
+
     for run in 1 ... repeats {
         var p = params
         p.seed = seed &+ UInt64(run - 1)
@@ -602,11 +639,13 @@ if let diffusionPath {
                 let td = Date().timeIntervalSince(tf)
                 var settings = FaceRepairSettings()
                 settings.strength = faceStrength
+                settings.inpaintSize = faceSize ?? FaceRepairGeometry.repaintSize(faces, settings: settings)
                 let fixed = try engine.repairFaces(rgb: rgb.pixels, width: rgb.width, height: rgb.height, faces: faces, p,
                                                    settings: settings) { _, done, total in showProgress("face", done, total) }
                 FileHandle.standardError.write(Data("\n".utf8))
                 image = MLXArray(fixed, [rgb.height, rgb.width, 3], type: UInt8.self)
-                print(String(format: "face repair %.2fs: %d face(s), detection %.3fs", Date().timeIntervalSince(tf), faces.count, td))
+                print(String(format: "face repair %.2fs: %d face(s), %d px, detection %.3fs", Date().timeIntervalSince(tf),
+                             faces.count, settings.inpaintSize, td))
             }
             try Image(image).save(url: outputURL(run))
             var line = String(
