@@ -232,12 +232,31 @@ private let vaeLdmToDiffusers: [(String, String)] = {
 
 // MARK: - Loading
 
+/// The tensor names stored in a safetensors file, read from its JSON header alone (no tensor
+/// data touched), so configs can ship marker tensors without the loader having to materialise them.
+func safetensorsTensorNames(contentsOf url: URL) throws -> [String] {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    guard let sizeData = try handle.read(upToCount: 8), sizeData.count == 8 else {
+        throw WaiError.badCheckpoint("\(url.lastPathComponent): truncated safetensors header")
+    }
+    let headerSize = Int(sizeData.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+    guard headerSize > 2, headerSize < 1 << 28,
+        let headerData = try handle.read(upToCount: headerSize), headerData.count == headerSize,
+        let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any]
+    else { throw WaiError.badCheckpoint("\(url.lastPathComponent): unreadable safetensors header") }
+    return header.keys.filter { $0 != "__metadata__" }
+}
+
 /// The four SDXL components loaded from one single-file checkpoint.
 struct SDXLComponents {
     let unet: UNetModel
     let clipL: CLIPTextModel
     let clipG: CLIPTextModel
     let vae: Autoencoder
+    /// what the checkpoint's own config says it predicts (`v_pred`/`ztsnr` markers); presets and
+    /// CLI flags override the maths, but it picks the noise schedule: the model was trained on it
+    let prediction: Prediction
 }
 
 func bundledJSON<T: Decodable>(_ name: String, as: T.Type) throws -> T {
@@ -349,7 +368,13 @@ func loadSDXLCheckpoint(url: URL, dType: DType = .float16) throws -> SDXLCompone
     let vae = Autoencoder(configuration: try bundledJSON("sdxl_vae", as: AutoencoderConfiguration.self))
     try apply(vaeWeights, to: vae)
 
-    return SDXLComponents(unet: unet, clipL: clipL, clipG: clipG, vae: vae)
+    // --- checkpoint markers: NoobAI-XL V-Pred 1.0 stores empty `v_pred`/`ztsnr` tensors in its
+    // header; they say the model predicts v and was trained with zero terminal SNR sigmas.
+    // (Read from the safetensors header, not `all`: a streaming load may skip zero-size tensors.)
+    let names = (try? safetensorsTensorNames(contentsOf: url)) ?? []
+    let prediction: Prediction = names.contains("v_pred") || names.contains("ztsnr") ? .v : .epsilon
+
+    return SDXLComponents(unet: unet, clipL: clipL, clipG: clipG, vae: vae, prediction: prediction)
 }
 
 /// CLIP BPE tokenizer shared by both SDXL text encoders (they use the same vocabulary).
