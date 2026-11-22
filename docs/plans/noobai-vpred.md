@@ -80,3 +80,22 @@ guidance still applies.
   No job/CLI/remote plumbing needed (jobs carry the preset, remote sends its id).
   Release build clean; app launches with the four presets. No release cut.
 
+
+### Review (Claude, 2026-11-22)
+
+- Fixed CFG Rescale: it scaled to std(uncond) instead of std(cond) (ComfyUI RescaleCFG / Lin et al. use the
+  positive prediction). Now `rescaled(out, cond:)` inside the guidance code, computed per call in float32, and only
+  for `prediction == .v` (ComfyUI rescales in v space; on an eps model the eps output isn't that).
+- Fixed the guided branch (Faster hi-res guidance / guidance interval): the rescale ratio was saved on full-CFG calls
+  and reused on reuse calls and on unguided calls. Reuse calls now rescale their own `epsC + (cfg−1)·dir` against
+  `epsC`; unguided calls (no CFG) aren't rescaled. Because the rescale happens inside the cached prediction, the step
+  cache stays consistent.
+- Doc fix: the noise schedule follows the checkpoint (`detectedPrediction`), not `SDXLParameters.prediction`.
+- Commits were first made on `main` by mistake; moved to this branch, `main` reset to origin/main (a0dea7b).
+- Checks (M5 Max, CLI, 832×1216, seed 4241/4242):
+  - WAI v16 and NoobAI-XL 1.1, app-default path (Euler a, step cache 0.5, hi-res guidance every 2, 1.5× hi-res,
+    face repair), warm run: pixel-identical to a clean `main` build (a0dea7b). 21.9 s / 21.6 s.
+  - V-Pred, Euler normal 28, CFG 4.5: plain = clean but saturated/high contrast; `--cfg-rescale 0.7` = softer, natural
+    colours (13 dB apart, different trajectory as expected), base 10.6 s.
+  - V-Pred full path (rescale + hi-res 1.5× + face repair): clean 1248×1824. Hi-res guidance every 2 vs every step:
+    31.8 dB, same image to the eye, hi-res pass 15.8 s vs 20.6 s (−23 %), total 29.0 s vs 34.0 s.

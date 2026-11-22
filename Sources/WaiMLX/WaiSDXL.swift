@@ -33,12 +33,12 @@ public struct SDXLParameters: Sendable {
     /// > 1: the hi-res pass computes guidance only on every n-th model call and reuses the last guidance
     /// direction (cond − uncond) on the others, which run the UNet once (CFG caching, as in FasterCache).
     public var hiresGuidanceEvery = 1
-    /// What the UNet predicts. `.v` (NoobAI-XL V-Pred 1.0) pairs with the zero-terminal-SNR schedule
-    /// (`DiscreteSchedule(zeroTerminalSNR: true)`, chosen automatically from this value) and needs
-    /// CFG Rescale below; the denoiser converts the network output itself, the samplers do not change.
+    /// What the UNet predicts. `.v` (NoobAI-XL V-Pred 1.0) wants CFG Rescale below; the denoiser converts
+    /// the network output itself, the samplers do not change. The noise schedule follows the checkpoint
+    /// (`WaiSDXL.detectedPrediction`): v-pred checkpoints get zero terminal SNR whatever this says.
     public var prediction: Prediction = .epsilon
-    /// CFG Rescale (Lin et al. 2023): 0 = off, 0.7 recommended for v-prediction models. Only applied when
-    /// CFG is actually on.
+    /// CFG Rescale (Lin et al. 2023): 0 = off, > 0 = on with ComfyUI's 0.7 blend, recommended for v-prediction
+    /// models. Only applied with `prediction == .v` and on steps that use CFG.
     public var cfgRescale: Float = 0
 
     public init(prompt: String) { self.prompt = prompt }
@@ -322,14 +322,18 @@ public final class WaiSDXL {
         let schedule = self.schedule
         let dtype = self.dtype
         let compiled = compileUNet ? compiledUNet : nil
-        let rescaleBlend: Float = cfgRescale > 0 ? 0.7 : 1
-        /// CFG Rescale (Lin et al., "Common Diffusion Noise Schedules..."): the multiplier that brings the
-        /// guided output's std back to the unconditional one, blended with 1 by 0.7 (the strength ComfyUI
-        /// and the NoobAI guide use). Std over the spatial dims and channels, per batch item.
-        func rescaleRatio(_ uncond: MLXArray, _ out: MLXArray) -> MLXArray {
-            let stdU = std(uncond, axes: [1, 2, 3], keepDims: true)
-            let stdC = std(out, axes: [1, 2, 3], keepDims: true)
-            return (stdU / (stdC + 1e-8)).asType(out.dtype) * rescaleBlend + (1 - rescaleBlend)
+        let rescales = cfgRescale > 0 && prediction == .v
+        let rescaleBlend: Float = 0.7
+        /// CFG Rescale (Lin et al., "Common Diffusion Noise Schedules...", ComfyUI RescaleCFG): scales the
+        /// guided v output so its std matches the prompt-only (cond) output's, blended 0.7 with plain CFG.
+        /// Std over channels and spatial dims, per batch item. v-prediction only: ComfyUI rescales in v
+        /// space, which for a v model is the network output itself.
+        func rescaled(_ out: MLXArray, cond: MLXArray) -> MLXArray {
+            guard rescales else { return out }
+            let o = out.asType(.float32)
+            let stdC = std(cond.asType(.float32), axes: [1, 2, 3], keepDims: true)
+            let stdO = std(o, axes: [1, 2, 3], keepDims: true)
+            return (o * (stdC / (stdO + 1e-8) * rescaleBlend + (1 - rescaleBlend))).asType(out.dtype)
         }
         /// eps or v output -> denoised (x0) latent. `x` is the sigma-space latent (x = x0 + σ·eps),
         /// `sigma` the step's sigma. EPS: x0 = x − σ·out. v-pred (comfy V_PREDICTION):
@@ -342,7 +346,7 @@ public final class WaiSDXL {
         if let guided {
             let condContext = context[0 ..< 1]
             let condText = (textTime.0[0 ..< 1], textTime.1[0 ..< 1])
-            final class Reuse { var direction: MLXArray?; var ratio: MLXArray?; var calls = 0 }
+            final class Reuse { var direction: MLXArray?; var calls = 0 }
             let reuse = Reuse()
             return { x, sigma in
                 let cIn = 1 / (sigma * sigma + 1).squareRoot()
@@ -358,19 +362,18 @@ public final class WaiSDXL {
                             ?? unet(xIn, timestep: timesteps, encoderX: context, textTime: textTime)
                         let (epsC, epsU) = eps.split()
                         if guidanceEvery > 1 { reuse.direction = epsC - epsU }
-                        let out = epsU + cfg * (epsC - epsU)
-                        if cfgRescale > 0 { reuse.ratio = rescaleRatio(epsU, out) }
-                        return out
+                        return rescaled(epsU + cfg * (epsC - epsU), cond: epsC)
                     }
                     let timesteps = MLXArray([t])
                     let epsC = compiled.map { $0([x1, timesteps, condContext, condText.0, condText.1])[0] }
                         ?? unet(x1, timestep: timesteps, encoderX: condContext, textTime: condText)
-                    if wantsGuidance, let direction = reuse.direction { return epsC + (cfg - 1) * direction }
+                    if wantsGuidance, let direction = reuse.direction {
+                        return rescaled(epsC + (cfg - 1) * direction, cond: epsC)
+                    }
                     return epsC
                 }
                 let e = (cache.map { $0(x1.asType(.float32), sigma: sigma, compute: predict) } ?? predict()).asType(x.dtype)
-                let guidedOut = cfgRescale > 0 ? e * (reuse.ratio ?? MLXArray(Float(1))) : e
-                return denoised(guidedOut, x: x, sigma: sigma)
+                return denoised(e, x: x, sigma: sigma)
             }
         }
         return { x, sigma in
@@ -387,8 +390,7 @@ public final class WaiSDXL {
             let eps = cache.map { $0(xIn.asType(.float32), sigma: sigma, compute: run) } ?? run()
             let (epsC, epsU) = eps.split()
             let e = (epsU + cfg * (epsC - epsU)).asType(x.dtype)
-            let guidedOut = cfgRescale > 0 ? e * rescaleRatio(epsU.asType(x.dtype), e) : e
-            return denoised(guidedOut, x: x, sigma: sigma)
+            return denoised(rescaled(e, cond: epsC), x: x, sigma: sigma)
         }
     }
 
