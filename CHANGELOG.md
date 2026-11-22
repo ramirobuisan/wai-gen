@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: **Step cache with Fast mode** (or with the Euler / DPM++ 2M samplers) made grainy or washed-out images: with
+  samplers that don't add fresh noise every step the cache skipped about half of the model calls. The step cache now
+  only applies with Euler a (the default); the inspector says when it's not used.
+
 ## 0.3.3 (2026-11-22)
 
 Faster:

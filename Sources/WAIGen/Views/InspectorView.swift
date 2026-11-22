@@ -107,6 +107,11 @@ struct InspectorView: View {
                     Toggle("Step cache", isOn: $model.settings.stepCache)
                     Text("Reuses the model's output on steps where it barely changes: about 25 % faster, nearly the same image")
                         .font(.caption).foregroundStyle(.secondary)
+                    let sampler = model.settings.fastMode ? preset.defaults.fast.sampler : model.settings.sampler
+                    if model.settings.stepCache, !sampler.supportsStepCache {
+                        Text("Not used with \(sampler.label)\(model.settings.fastMode ? " (Fast mode)" : ""): it only works with Euler a; with other samplers it skips too much and the image gets grainy")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
 

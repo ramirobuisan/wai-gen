@@ -12,6 +12,11 @@ enum Sampler: String, CaseIterable, Codable, Identifiable {
     case euler
     case dpmpp2m = "dpmpp_2m"
 
+    /// The step cache (EasyCache) was tuned on Euler a, which adds fresh noise every step. With Euler or
+    /// DPM++ 2M the latent changes smoothly, the cache skips far more steps (23-25 of 43 instead of 13) and the
+    /// image comes out washed out or grainy (docs/PERFORMANCE.md, round 10), so it only applies to Euler a.
+    var supportsStepCache: Bool { self == .eulerA }
+
     var id: String { rawValue }
     var label: String {
         switch self {

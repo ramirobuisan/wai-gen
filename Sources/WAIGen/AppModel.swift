@@ -469,7 +469,8 @@ final class AppModel {
                     : nil,
                 loras: jobLoRAs,
                 hiresUpscaler: upscalerURL,
-                livePreview: s.livePreview, stepCache: s.stepCache, artists: s.artists,
+                livePreview: s.livePreview, stepCache: s.stepCache && (fast?.sampler ?? s.sampler).supportsStepCache,
+                artists: s.artists,
                 hiresGuidanceEvery: s.fastHiresGuidance && preset.engine == .sdxl ? 2 : 1)
             pending.append(job)
         }
@@ -531,19 +532,21 @@ final class AppModel {
             return loraAvailable(l.path) ? JobLoRA(url: url, relativePath: l.path, strength: l.strength) : nil
         }
         let seed = r?.seed ?? Int64(UInt32.random(in: 0 ... UInt32.max))
+        let upscaleSampler = r.flatMap { rec in Sampler.allCases.first { $0.label == rec.sampler } } ?? s.sampler
         let job = GenerationJob(
             preset: p, modelsRoot: AppPaths.models,
             positive: r?.positive ?? assemblePositive(seed: seed),
             negative: r?.negative ?? s.negative,
             characters: r?.characters ?? s.characters, userPrompt: r?.userPrompt ?? s.prompt,
             width: tw, height: th, steps: r?.steps ?? s.steps, cfg: r?.cfg ?? s.cfg,
-            sampler: r.flatMap { rec in Sampler.allCases.first { $0.label == rec.sampler } } ?? s.sampler,
+            sampler: upscaleSampler,
             scheduler: r.flatMap { rec in Scheduler.allCases.first { $0.label == rec.scheduler } } ?? s.scheduler,
             seed: seed,
             hires: (min(s.hiresScale, p.defaults.maxHiresScale), s.hiresSteps, s.hiresDenoise),
             faceRepair: detail && s.faceRepair && faceDetectorAvailable
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
-            loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview, stepCache: s.stepCache,
+            loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview,
+            stepCache: s.stepCache && upscaleSampler.supportsStepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
             artists: r.map { $0.artists ?? [] } ?? s.artists,
             hiresGuidanceEvery: detail && s.fastHiresGuidance && p.engine == .sdxl ? 2 : 1)
