@@ -43,6 +43,8 @@ def main():
     # in "sampler space" (i.e. what process_latent_in already produced).
     torch.manual_seed(SEED)
     noise = torch.randn(1, 16, 128, 128, dtype=torch.float32)  # cpu, float32
+    # and one for 832x1216 (latent 152x104: 76x52 = 3952 image tokens, padded to 3968 with x_pad_token)
+    noise_tall = torch.randn(1, 16, 152, 104, dtype=torch.float32)
 
     print("Loading checkpoint (this reads 20.5 GB)...")
     model_patcher, clip, vae, clipvision = comfy.sd.load_checkpoint_guess_config(
@@ -58,7 +60,7 @@ def main():
     dtype = model.get_dtype_inference()
     print("diffusion device:", device, "dtype:", dtype, "torch:", torch.__version__)
 
-    out = {}
+    out = {"noise": noise, "noise_832x1216": noise_tall}
 
     # --- text encoder -----------------------------------------------------
     tokens = clip.tokenize(PROMPT)
@@ -107,6 +109,14 @@ def main():
         print("  apply_model vs (x - sigma*dit_out) max abs diff:", d)
         stats("denoised_s{:.1f}".format(sigma), denoised)
         out["denoised_s{:.1f}".format(sigma)] = denoised
+
+    # 832x1216 at sigma 0.5: exercises the image-token padding (x_pad_token) and the crop after unpatchify
+    with torch.no_grad():
+        dit_tall = model.diffusion_model(noise_tall.to(device=device, dtype=dtype),
+                                         torch.tensor([0.5], device=device, dtype=torch.float32),
+                                         context=context, num_tokens=num_tokens)
+    stats("dit_out_832x1216_s0.5", dit_tall)
+    out["dit_out_832x1216_s0.5"] = dit_tall
 
     # --- VAE ---------------------------------------------------------------
     crop = noise[:, :, :64, :64]  # raw latent crop treated as a z (vae.decode does not rescale)

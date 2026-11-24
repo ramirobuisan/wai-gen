@@ -136,3 +136,19 @@ Facts from ComfyUI's `_forward` you must match:
   - ComfyUI API notes for re-runs: `load_models_gpu(models)` mutates in place and returns None (`force_full_load=True`);
     `clip.tokenize(text)["qwen3_4b"]` is a *list of batches of (id, weight) pairs*; `encode_from_tokens(tokens,
     return_dict=True)` gives `{"cond", "pooled_output", "attention_mask"}`.
+- **Steps 1-2 (text encoder, DiT; Claude finished step 2, 2026-11-24).** `scripts/zimage_reference.py` now also saves
+  the input noise (`noise`, seed 42) and an 832×1216 case (`noise_832x1216`, `dit_out_832x1216_s0.5`: 3952 image tokens,
+  padded to 3968). `waigen-cli --zimage <aio> --zimage-check ref.safetensors -p "<prompt>"` checks both, M5 Max, bf16:
+  - Text encoder (OpenCode's `ZImageTextEncoder`, `Qwen3TextEncoder(keyPrefix:)` + `outputLayerIndex`): token ids
+    identical (31); conditioning cosine per token min 0.99967 / mean 0.99992, mean abs error 1.8 % of mean abs
+    (max abs diff 173 on the 13677 outlier channel: bf16 rounding through 35 layers). Fix: the encoder returns
+    [n, hidden]; the check reshaped it.
+  - DiT (`ZImageDiT`, rewritten from OpenCode's draft, which didn't compile): with the reference's own noise and
+    conditioning, per-channel cosine min / mean and mean abs error: 1024² σ1.0 0.99948 / 0.99964, 2.3 %; σ0.5 0.99985 /
+    0.99991, 1.2 %; 832×1216 σ0.5 0.99985 / 0.99991, 1.2 %. One forward at 1024²: 1.19 s warm (first 2.7 s).
+    Fixes vs the draft: patch features ordered (row, column, channel) as ComfyUI's
+    `view(B,C,H/2,2,W/2,2).permute(0,2,4,3,5,1)` (the draft had channel first); caption padded to a multiple of 32
+    (the draft's `padToMultiple` returned the pad count); image tokens padded with `x_pad_token`, pad positions
+    (0,0,0), unpatchify takes tokens capLen ..< capLen + h·w; q/k RMSNorm eps = float32 epsilon (ComfyUI RMSNorm
+    eps=None), block norms 1e-5; RoPE tables built from the position arrays at once; `pad_to_patch_size` pads
+    circularly at the bottom/right only.

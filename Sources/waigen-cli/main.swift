@@ -27,6 +27,15 @@ func fail(_ msg: String) -> Never {
     finish(1)
 }
 
+/// Per-row cosine similarity (rows = all but the last axis) and the mean abs error relative to the mean abs value.
+func similarity(_ a: MLXArray, _ b: MLXArray) -> String {
+    let (x, y) = (a.asType(.float32), b.asType(.float32))
+    let cosv = (x * y).sum(axis: -1) / (sqrt((x * x).sum(axis: -1)) * sqrt((y * y).sum(axis: -1)) + 1e-12)
+    let rel = abs(x - y).mean().item(Float.self) / max(abs(y).mean().item(Float.self), 1e-12)
+    return String(format: "cosine min %.6f mean %.6f, mean abs error %.2f %% of mean abs", cosv.min().item(Float.self),
+                  cosv.mean().item(Float.self), rel * 100)
+}
+
 func finish(_ code: Int32) -> Never {
     fflush(stdout)
     fflush(stderr)
@@ -104,6 +113,8 @@ let benchAnima = take("--bench-anima")            // WxH: Anima forward time per
 let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16
 let vaeRoundtrip = take("--vae-roundtrip")        // WAI-ANIMA: encode + decode an image with the VAE
 let esrganTest = take("--esrgan-test")            // upscale an image with --hires-upscaler and time it
+let zimagePath = take("--zimage")                 // Z-Image AIO checkpoint (DiT + Qwen3-4B + Flux VAE)
+let zimageCheck = take("--zimage-check")          // ref.safetensors: verify the Z-Image text encoder against it
 let benchConv = flag("--bench-conv")              // 3x3 convs: MLX's conv2d vs matmul rewrites (time + diff)
 let serveTest = take("--serve-test")              // port: a test generator (dummy images) to check the protocol
 let remoteAddress = take("--remote")             // host[:port] of a Mac sharing WAI Gen: generate there
@@ -354,6 +365,65 @@ if let esrganTest {
                          Date().timeIntervalSince(t)))
         }
         try Image(out).save(url: outputURL(1))
+    } catch { fail(error.localizedDescription) }
+    finish(0)
+}
+
+if let checkPath = zimageCheck {
+    // Step 1 of docs/plans/z-image-anime.md: verify our Z-Image text encoder against the ComfyUI reference
+    // tensors (step 0): the token ids must match and the conditioning must be within bf16 rounding.
+    guard let zimagePath else { fail("--zimage-check needs --zimage <aio.safetensors>") }
+    guard !prompt.isEmpty else { fail("--zimage-check needs the prompt the reference was made with (-p)") }
+    do {
+        let tl = Date()
+        let encoder = try Qwen3TextEncoder(url: URL(fileURLWithPath: zimagePath),
+                                           keyPrefix: "text_encoders.qwen3_4b.transformer.model.")
+        print(String(format: "Qwen3-4B text encoder (%d layers, hidden %d, heads %d/%d kv) loaded in %.1fs",
+                     encoder.layers, encoder.hidden, encoder.heads, encoder.kvHeads, Date().timeIntervalSince(tl)))
+        let te = ZImageTextEncoder(encoder: encoder, tokenizer: try AnimaTokenizer().qwen)
+        let t0 = Date()
+        let ours = te.encode(prompt)
+        print(String(format: "encoded %d tokens in %.2fs", ours.dim(0), Date().timeIntervalSince(t0)))
+        let ref = try loadArrays(url: URL(fileURLWithPath: checkPath))
+        guard let refTokens = ref["tokens"] else { fail("\(checkPath as NSString).lastPathComponent has no 'tokens' tensor") }
+        let refIds = refTokens.asArray(Int64.self).map { Int32($0) }
+        let ourIds = te.tokenize(prompt)
+        if ourIds == refIds {
+            print("token ids: identical (\(refIds.count))")
+        } else {
+            print("token ids: DIFFER (ours \(ourIds.count) vs reference \(refIds.count))")
+            print("  ours:  \(ourIds)")
+            print("  ref:   \(refIds)")
+        }
+        guard let refCond = ref["cond"] else { fail("\(checkPath as NSString).lastPathComponent has no 'cond' tensor") }
+        let r = refCond.asType(.float32), o = ours.asType(.float32).reshaped(r.shape)   // ours is [n, hidden]
+        guard o.shape == r.shape else { fail("cond shape \(o.shape) != reference \(r.shape)") }
+        let diff = abs(o - r)
+        let maxDiff = diff.max().item(Float.self)
+        let maxAbs = max(r.abs().max().item(Float.self), 1e-9)
+        print(String(format: "cond max abs diff %.6f, max abs ref %.3f, relative %.3e, mean abs diff %.6f",
+                     maxDiff, maxAbs, maxDiff / maxAbs, diff.mean().item(Float.self)))
+        print("cond " + similarity(o, r))
+
+        // step 2: the DiT on the reference's own noise and conditioning (isolates it from the text encoder)
+        if let noise = ref["noise"] {
+            let td = Date()
+            let dit = try ZImageDiT(url: URL(fileURLWithPath: zimagePath))
+            print(String(format: "DiT (%d layers, %d+%d refiner) loaded in %.1fs", dit.layers, dit.refinerLayers,
+                         dit.refinerLayers, Date().timeIntervalSince(td)))
+            var cases: [(String, MLXArray, Float)] = [("1024² σ1.0", noise, 1.0), ("1024² σ0.5", noise, 0.5)]
+            if let tall = ref["noise_832x1216"] { cases.append(("832×1216 σ0.5", tall, 0.5)) }
+            let refKeys = ["dit_out_s1.0", "dit_out_s0.5", "dit_out_832x1216_s0.5"]
+            for (i, (name, x, sigma)) in cases.enumerated() {
+                guard let expected = ref[refKeys[i]] else { continue }
+                let t0 = Date()
+                let out = dit(x, sigma: sigma, context: refCond)
+                eval(out)
+                let dt = Date().timeIntervalSince(t0)
+                print(String(format: "DiT %@: %.2fs, ", name, dt)
+                      + similarity(out.reshaped(16, -1), expected.reshaped(16, -1)))
+            }
+        }
     } catch { fail(error.localizedDescription) }
     finish(0)
 }

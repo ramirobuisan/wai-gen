@@ -328,7 +328,7 @@ public struct AnimaTokens: Sendable, Hashable {
 }
 
 public final class AnimaTokenizer {
-    let qwen: Qwen2Tokenizer
+    public let qwen: Qwen2Tokenizer
     let t5: T5UnigramTokenizer
 
     public init() throws {

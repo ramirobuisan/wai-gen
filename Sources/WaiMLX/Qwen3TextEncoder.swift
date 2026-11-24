@@ -18,15 +18,21 @@ public final class Qwen3TextEncoder {
     public let headDim: Int
     public var ropeBase: Float = 1_000_000
     public var eps: Float = 1e-6
+    /// Index (0-based) of the last layer to run, like ComfyUI's `layer_idx`: that layer's output is returned
+    /// and the final norm is skipped (Qwen3-4B conditioning uses layer −2, the second-to-last, un-normed).
+    /// nil (the default) runs every layer and applies the final norm, as WAI-ANIMA does.
+    public var outputLayerIndex: Int? = nil
 
     public struct Unsupported: LocalizedError {
         public let errorDescription: String?
     }
 
-    public init(url: URL, dtype: DType = .bfloat16) throws {
+    public init(url: URL, dtype: DType = .bfloat16, keyPrefix: String? = nil) throws {
         var weights: [String: MLXArray] = [:]
         for (k, v) in try loadArrays(url: url) {
-            var key = k
+            // AIO files (z-image-anime) keep all three models in one file: take only the keys of this model
+            if let keyPrefix, !k.hasPrefix(keyPrefix) { continue }
+            var key = keyPrefix.map { String(k.dropFirst($0.count)) } ?? k
             for prefix in ["text_encoders.llm.", "model."] where key.hasPrefix(prefix) { key = String(key.dropFirst(prefix.count)) }
             weights[key] = v.asType(dtype)
         }
@@ -54,7 +60,8 @@ public final class Qwen3TextEncoder {
         let n = ids.count
         var x = w["embed_tokens.weight"]![MLXArray(ids)][.newAxis]   // [1, n, hidden]
         let scale = 1 / Float(headDim).squareRoot()
-        for i in 0 ..< layers {
+        let runCount = min((outputLayerIndex ?? layers - 1) + 1, layers)   // layers to run (incl. outputLayerIndex)
+        for i in 0 ..< runCount {
             let p = "layers.\(i)"
             let h = MLXFast.rmsNorm(x, weight: w[p + ".input_layernorm.weight"]!, eps: eps)
             var q = linear(h, p + ".self_attn.q_proj").reshaped(1, n, heads, headDim)
@@ -69,6 +76,7 @@ public final class Qwen3TextEncoder {
             let h2 = MLXFast.rmsNorm(x, weight: w[p + ".post_attention_layernorm.weight"]!, eps: eps)
             x = x + linear(silu(linear(h2, p + ".mlp.gate_proj")) * linear(h2, p + ".mlp.up_proj"), p + ".mlp.down_proj")
         }
+        if outputLayerIndex != nil { return x[0].asType(.float32) }   // hidden states of `last`, no final norm
         return MLXFast.rmsNorm(x, weight: w["norm.weight"]!, eps: eps)[0].asType(.float32)
     }
 
