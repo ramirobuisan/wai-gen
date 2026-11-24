@@ -32,8 +32,9 @@ Picking a model applies its recommended settings (steps, CFG, sampler, size, hi-
 - Danbooru tag autocomplete, `(tag:1.2)` weights, wildcards (`__name__`, nested)
 - Hi-res fix with an ESRGAN upscaler (e.g. RealESRGAN x4plus anime 6B), face repair (ADetailer-style, YOLOv8 face detector)
 - Default negatives include watermark / signature / Patreon tags, which these models otherwise like to draw
-- LoRAs for both engines (merged into the MLX models): LoRA, LoCon, LoKr and LoHa (LyCORIS, trained norm layers
-  included), with a warning when a LoRA was made for the other model family
+- LoRAs for every engine: LoRA, LoCon, LoKr and LoHa merged into the WAI v16 / NoobAI-XL / WAI-ANIMA models
+  (LyCORIS, trained norm layers included); on Z-Image, LoRA / LoCon added at run time (also in its 8-bit mode). A
+  warning shows when a LoRA was made for another model family
 - Fast mode: a quicker sampler with fewer steps (~30 % faster, slightly different look)
 - Step cache: skips model calls on steps that barely change the image (EasyCache, ~25-35 % faster, nearly the same
   image; Euler a only)

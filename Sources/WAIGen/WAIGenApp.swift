@@ -236,6 +236,7 @@ struct SettingsView: View {
     @State private var aiURL = AIPrompt.baseURL
     @AppStorage(GenerationService.keepLoadedKey) private var keepAllLoaded = false
     @AppStorage(GenerationService.preloadKey) private var preloadAtLaunch = true
+    @AppStorage(GenerationService.zimageLowMemoryKey) private var zimageLowMemory = GenerationService.zimageLowMemory
     @AppStorage(AppModel.idleMinutesKey) private var idleMinutes = 5
 
     var body: some View {
@@ -273,6 +274,10 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Keep every image model loaded", isOn: $keepAllLoaded)
                 Text("Off: only the selected model stays in memory. On: switching between WAI v16 and WAI-ANIMA is instant, at the cost of more memory.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Z-Image: use less memory (8-bit)", isOn: $zimageLowMemory)
+                    .onChange(of: zimageLowMemory) { _, _ in if !model.isBusy { model.unloadModels() } }
+                Text("11 GB instead of 20 GB for Z-Image Anime, about 20 % slower, nearly the same image. Applies the next time it loads.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Free the memory after", selection: $idleMinutes) {
                     Text("5 minutes idle").tag(5)

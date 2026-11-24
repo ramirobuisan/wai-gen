@@ -162,7 +162,7 @@ struct InspectorView: View {
 
             CollapsibleSection(title: "LoRA", isExpanded: $openLoRA) {
                 if preset.engine == .zimage {
-                    Text("Z-Image doesn't take LoRAs yet: the ones listed here are skipped with this model.")
+                    Text("Z-Image takes LoRAs made for Z-Image (Turbo), in the usual LoRA format; LoHa / LoKr aren't supported yet.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach($model.settings.loras) { $sel in

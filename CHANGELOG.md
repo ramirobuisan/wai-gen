@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **LoRAs on Z-Image Anime**: LoRAs made for Z-Image (Turbo) now work, in ai-toolkit, kohya and ComfyUI layouts. They're
+  added as a small extra term on each layer while generating, so they cost almost nothing, switch instantly and also
+  work in the 8-bit mode below. Checked against ComfyUI's LoRA loading. LoHa / LoKr aren't supported on Z-Image yet.
+- **Z-Image: use less memory**: Settings → Memory → "Z-Image: use less memory (8-bit)" loads its model and text
+  encoder in 8 bits (11 GB instead of 20, and never more than that while loading), for a nearly identical image. It
+  isn't faster: the model is compute-bound. On by default on Macs with less than 48 GB.
+- **AI prompt writes sentences for Z-Image**: its Qwen3 text encoder reads plain English, so the AI prompt button now
+  writes a short description for it (Tags | Sentences switch, sentences by default on Z-Image).
+- **Faster Z-Image hi-res fix**: 3 steps at denoise 0.30 by default (was 5 at 0.35), the same look for about 30 % less
+  time (docs/PERFORMANCE.md, round 12).
+- Z-Image gets the prompt as plain text: weight syntax such as `(tag:1.2)` and the `\(` escapes in character tags are
+  turned into plain words.
+
 ## 0.5.0 (2026-11-24)
 
 - **Z-Image Anime (Turbo)** as a fifth model (⌘5), on a new MLX engine: put `z-image-anime-aio-bf16.safetensors`

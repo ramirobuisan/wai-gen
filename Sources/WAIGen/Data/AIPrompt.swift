@@ -20,6 +20,23 @@ enum AIPrompt {
         set { UserDefaults.standard.set(newValue, forKey: modelKey) }
     }
 
+    /// What the AI writes: Danbooru tags (WAI v16, NoobAI-XL, WAI-ANIMA) or plain sentences (Z-Image, whose Qwen3
+    /// text encoder reads natural language).
+    enum Style: String, CaseIterable, Identifiable {
+        case tags, sentences
+        var id: String { rawValue }
+        var label: String { self == .tags ? "Tags" : "Sentences" }
+        static func `default`(for engine: EngineKind) -> Style { engine == .zimage ? .sentences : .tags }
+    }
+
+    static let sentencePrompt = """
+        You write prompts for an anime image model whose text encoder understands plain English.
+        Turn the user's scene description into 2 to 4 concrete, visual English sentences describing one
+        anime-style illustration: the subject, pose and expression, clothing, setting, lighting, mood and the
+        camera framing. Do not add character names the user didn't give, quality words (masterpiece, best quality),
+        headings, lists or any explanation. Reply with the sentences only.
+        """
+
     static let systemPrompt = """
         You write prompts for an anime image model that was trained on Danbooru tags.
         Turn the user's scene description into ONE line of 8 to 20 English Danbooru tags separated by commas:
@@ -47,8 +64,8 @@ enum AIPrompt {
         return chat.filter { loadedModels.contains($0.id) }.map(\.id) + chat.filter { !loadedModels.contains($0.id) }.map(\.id)
     }
 
-    /// Returns a tag line ready for the prompt (parentheses escaped for the weight syntax).
-    static func tags(for brief: String, model: String) async throws -> String {
+    /// Returns a tag line ready for the prompt (parentheses escaped for the weight syntax), or plain sentences.
+    static func write(for brief: String, model: String, style: Style = .tags) async throws -> String {
         guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespaces) + "/chat/completions") else {
             throw URLError(.badURL)
         }
@@ -59,7 +76,7 @@ enum AIPrompt {
         let body: [String: Any] = [
             "model": model,
             "messages": [
-                ["role": "system", "content": systemPrompt],
+                ["role": "system", "content": style == .tags ? systemPrompt : sentencePrompt],
                 ["role": "user", "content": brief + "\n/no_think"],
             ],
             "temperature": 0.7,
@@ -79,7 +96,17 @@ enum AIPrompt {
             let message = choices.first?["message"] as? [String: Any],
             let content = message["content"] as? String
         else { throw NSError(domain: "AIPrompt", code: 0, userInfo: [NSLocalizedDescriptionKey: "Unexpected reply from the server"]) }
-        return clean(content)
+        return style == .tags ? clean(content) : cleanSentences(content)
+    }
+
+    /// Strip reasoning blocks, fences, quotes and line breaks: one paragraph of sentences, text as written.
+    static func cleanSentences(_ text: String) -> String {
+        var t = text.replacing(#/(?s)<think>.*?</think>/#, with: "")
+        t = t.replacingOccurrences(of: "```", with: "")
+        return t.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'`")) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     /// Strip reasoning blocks and chatter, keep one comma-separated tag line.

@@ -239,7 +239,8 @@ enum ModelCatalog {
             defaults: PresetDefaults(
                 // the creator's ComfyUI workflow: 832×1216, 9 steps, CFG 1, Euler a with the beta schedule, shift 3
                 width: 832, height: 1216, steps: 9, cfg: 1, sampler: .eulerA, scheduler: .beta,
-                hiresEnabled: false, hiresScale: 1.5, hiresSteps: 5, hiresDenoise: 0.35, maxHiresScale: 1.5,
+                // hi-res: 3 steps at denoise 0.30 looks like 5 at 0.35 for ~30 % less time (PERFORMANCE.md, round 12)
+                hiresEnabled: false, hiresScale: 1.5, hiresSteps: 3, hiresDenoise: 0.30, maxHiresScale: 1.5,
                 qualityPrefix: "anime style, masterpiece, best quality", negative: "",
                 fast: .init(sampler: .eulerA, scheduler: .beta, steps: 9)),
             source: "Civitai 2259646 v2543657 (Z-Image-Turbo-Anime AIO BF16): ~9 steps, CFG 1, Euler a, beta, 832×1216"),

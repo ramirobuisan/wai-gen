@@ -90,6 +90,12 @@ final class GenerationService: @unchecked Sendable {
     static let keepLoadedKey = "keepModelsLoaded"
     static let preloadKey = "preloadModels"
     static var keepAllLoaded: Bool { UserDefaults.standard.object(forKey: keepLoadedKey) as? Bool ?? false }
+    /// Z-Image in 8 bits (DiT and text encoder): 11 GB of weights instead of 20, about 20 % slower per step, nearly
+    /// the same image (docs/PERFORMANCE.md, round 12). On by default on Macs with less than 48 GB.
+    static let zimageLowMemoryKey = "zimageLowMemory"
+    static var zimageLowMemory: Bool {
+        UserDefaults.standard.object(forKey: zimageLowMemoryKey) as? Bool ?? (ProcessInfo.processInfo.physicalMemory < 48 << 30)
+    }
 
     private let queue = DispatchQueue(label: "waigen.engine", qos: .userInitiated)
     // everything below is only touched on `queue`
@@ -219,7 +225,8 @@ final class GenerationService: @unchecked Sendable {
     private func loadZImage(_ p: ModelPreset, _ root: URL) throws -> WaiZImage {
         if let e = zimage[p.id] { return e }
         makeRoom(keeping: p.id)
-        let e = try WaiZImage(aio: root.appendingPathComponent(p.checkpoint ?? ""))
+        let bits = Self.zimageLowMemory ? 8 : nil   // quantized while loading: never 20 GB of bf16 in memory
+        let e = try WaiZImage(aio: root.appendingPathComponent(p.checkpoint ?? ""), ditBits: bits, textEncoderBits: bits)
         zimage[p.id] = e
         names[p.id] = p.name
         Memory.clearCache()
@@ -333,7 +340,14 @@ final class GenerationService: @unchecked Sendable {
     private func zimageEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiZImage {
         let p = job.preset
         if zimage[p.id] == nil { progress(.loadingModel(p.name)) }
-        return try loadZImage(p, job.modelsRoot)   // LoRAs aren't supported on Z-Image (the app doesn't send them)
+        let engine = try loadZImage(p, job.modelsRoot)
+        // LoRA / LoCon as run-time low-rank terms on the DiT; LoHa / LoKr aren't supported on Z-Image yet
+        let report = try engine.setLoRAs(loraSpecs(job))
+        if !report.unmatched.isEmpty || report.unsupported > 0 {
+            FileHandle.standardError.write(Data(
+                "Z-Image LoRA: \(report.unmatched.count) unmatched, \(report.unsupported) unsupported modules\n".utf8))
+        }
+        return engine
     }
 
     private func modelUpscaler(_ url: URL) throws -> ModelUpscaler {
@@ -615,7 +629,7 @@ final class GenerationService: @unchecked Sendable {
             fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
                                            settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
         case .zimage:
-            let engine = try loadZImage(job.preset, job.modelsRoot)
+            let engine = try loadZImage(job.preset, job.modelsRoot)   // with the job's LoRAs, set by zimageEngine
             var p = zimageParameters(job)
             if !fr.prompt.isEmpty { p.prompt = fr.prompt }
             fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,

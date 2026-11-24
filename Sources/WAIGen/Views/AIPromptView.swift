@@ -9,6 +9,8 @@ struct AIPromptView: View {
     @State private var selected = AIPrompt.model ?? ""
     @State private var busy = false
     @State private var error: String?
+    @State private var style: AIPrompt.Style?
+    private var currentStyle: AIPrompt.Style { style ?? .default(for: model.preset.engine) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -25,9 +27,16 @@ struct AIPromptView: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: 300)
+                Picker("Style", selection: Binding(get: { currentStyle }, set: { style = $0 })) {
+                    ForEach(AIPrompt.Style.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Tags for the Danbooru-trained models; sentences for Z-Image, which reads plain English")
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                Button("Write tags", action: run)
+                Button(currentStyle == .tags ? "Write tags" : "Write prompt", action: run)
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(busy || brief.trimmingCharacters(in: .whitespaces).isEmpty || selected.isEmpty)
             }
@@ -45,7 +54,7 @@ struct AIPromptView: View {
                     Spacer()
                     Button("Append to prompt") {
                         let p = model.settings.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                        model.settings.prompt = p.isEmpty ? result : p + (p.hasSuffix(",") ? " " : ", ") + result
+                        model.settings.prompt = p.isEmpty ? result : p + (p.hasSuffix(",") || p.hasSuffix(".") ? " " : ", ") + result
                     }
                     Button("Replace prompt") { model.settings.prompt = result }
                         .buttonStyle(.borderedProminent)
@@ -82,8 +91,8 @@ struct AIPromptView: View {
         error = nil
         Task {
             do {
-                result = try await AIPrompt.tags(for: text, model: selected)
-                if result.isEmpty { error = "The model didn't return any tags. Try again or pick another model." }
+                result = try await AIPrompt.write(for: text, model: selected, style: currentStyle)
+                if result.isEmpty { error = "The model didn't return anything. Try again or pick another model." }
             } catch {
                 self.error = error.localizedDescription
             }
