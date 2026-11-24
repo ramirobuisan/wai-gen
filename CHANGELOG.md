@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-11-24)
 
 - **Wallpaper sizes**: 704 × 1536 (iPhone Pro Max) and 1280 × 832 (MacBook Pro 14"), the screens' aspect ratios at the
   ~1 MP the models are trained on. A note under the size says how to reach the screen's own resolution (Upscale ×2 for
@@ -26,6 +26,13 @@
   time (docs/PERFORMANCE.md, round 12).
 - Z-Image gets the prompt as plain text: weight syntax such as `(tag:1.2)` and the `\(` escapes in character tags are
   turned into plain words.
+- The experimental speed options from the overnight tests (base-pass guidance reuse, Align Your Steps, ToDo) are now
+  in the code, off by default (CLI flags only); images are unchanged.
+
+Update: from 0.5.0 the Software Update window offers this version by itself (or **WAI Gen → Check for Updates…**);
+from 0.2.0-0.4.0, **Settings → Updates**. From an older build, download WAI-Gen.zip below, move **WAI Gen.app** to
+Applications and, the first time, allow it in **System Settings → Privacy & Security → Open Anyway**. The new models
+need their files in your models folder (see the README; **WAI Gen → Setup…** shows what's missing).
 
 ## 0.5.0 (2026-11-24)
 
