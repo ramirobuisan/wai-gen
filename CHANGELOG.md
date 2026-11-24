@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-24)
 
 - **Z-Image Anime (Turbo)** as a fifth model (⌘5), on a new MLX engine: put `z-image-anime-aio-bf16.safetensors`
   (Civitai 2259646, all in one file: the Z-Image NextDiT, its Qwen3-4B text encoder and the Flux VAE) in
@@ -21,6 +21,12 @@
 - **Welcome to WAI Gen**: a setup window at the first launch (when something's missing) and in **WAI Gen → Setup…**.
   It moves the app to Applications (updates need it there), picks the models folder and lists each model's files,
   the upscaler and the face detector as ready or missing, with a **Get It** button to each missing file's page.
+
+Update: WAI Gen 0.2.0 or later offers this version in **Settings → Updates** (and an "Update to 0.5.0" button in the
+toolbar); from 0.5.0 on, new versions open the Software Update window by themselves. From an older build, download
+WAI-Gen.zip below, move **WAI Gen.app** to Applications and, the first time, allow it in **System Settings → Privacy &
+Security → Open Anyway**. The new models need their checkpoints in `models/checkpoints` (see the README; **WAI Gen →
+Setup…** shows what's missing).
 
 ## 0.4.0 (2026-11-22)
 
