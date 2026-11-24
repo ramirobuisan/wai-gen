@@ -10,7 +10,18 @@ struct InspectorView: View {
     @AppStorage("inspector.openFaceRepair") private var openFaceRepair = true
     @AppStorage("inspector.openPrompt") private var openPrompt = true
 
-    private static let sizes: [(Int, Int)] = [(1024, 1344), (832, 1216), (896, 1152), (1024, 1024), (1152, 896), (1216, 832), (1344, 1024)]
+    private static let sizes: [(Int, Int)] = [(1024, 1344), (832, 1216), (896, 1152), (1024, 1024), (1152, 896), (1216, 832),
+                                              (1344, 1024)] + wallpapers.map { ($0.width, $0.height) }
+
+    /// Wallpaper sizes: the device's aspect ratio at ~1 MP (what the models are trained on, multiples of 64); the
+    /// gallery's Upscale ×2 (after hi-res for the Mac) reaches the screen's own resolution.
+    struct Wallpaper { let width: Int, height: Int, device: String, screen: (Int, Int), howTo: String }
+    static let wallpapers: [Wallpaper] = [
+        Wallpaper(width: 704, height: 1536, device: "iPhone Pro Max", screen: (1320, 2868),
+                  howTo: "Upscale ×2 in the gallery gives 1408 × 3072, more than the screen; iOS crops the rest."),
+        Wallpaper(width: 1280, height: 832, device: "MacBook Pro 14\"", screen: (3024, 1964),
+                  howTo: "Hi-res 1.5× (1920 × 1248), then Upscale ×2 in the gallery: 3840 × 2496, more than the screen."),
+    ]
 
     var body: some View {
         @Bindable var model = model
@@ -79,11 +90,17 @@ struct InspectorView: View {
                     })) {
                     // id must be the whole size: 1024×1344 and 1024×1024 share a width
                     ForEach(Self.sizes.map { "\($0.0)x\($0.1)" }, id: \.self) { key in
-                        Text(verbatim: key.replacingOccurrences(of: "x", with: " × ")).tag(key)
+                        let wall = Self.wallpapers.first { "\($0.width)x\($0.height)" == key }
+                        Text(verbatim: key.replacingOccurrences(of: "x", with: " × ") + (wall.map { " · \($0.device)" } ?? ""))
+                            .tag(key)
                     }
                     if !Self.sizes.contains(where: { $0 == (model.settings.width, model.settings.height) }) {
                         Text(verbatim: "\(model.settings.width) × \(model.settings.height)").tag("\(model.settings.width)x\(model.settings.height)")
                     }
+                }
+                if let wall = Self.wallpapers.first(where: { $0.width == model.settings.width && $0.height == model.settings.height }) {
+                    Text("\(wall.device) wallpaper (screen \(wall.screen.0) × \(wall.screen.1)). \(wall.howTo)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.steps) }, set: { model.settings.steps = Int($0) }),
                           range: 8 ... 60, step: 1, format: "%.0f")

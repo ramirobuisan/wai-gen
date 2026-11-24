@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Wallpaper sizes**: 704 × 1536 (iPhone Pro Max) and 1280 × 832 (MacBook Pro 14"), the screens' aspect ratios at the
+  ~1 MP the models are trained on. A note under the size says how to reach the screen's own resolution (Upscale ×2 for
+  the iPhone; hi-res 1.5× and Upscale ×2 for the Mac).
 - **Three more models** (⌘6-⌘8), each with its page's recommended settings:
   - **WAI-SHUFFLE-NOOB V-Pred** (Civitai 989367, by WAI0731): NoobAI v-prediction on the V-Pred engine; Euler a, 30
     steps, CFG 5, 1024×1344. CFG Rescale stays off for it: at 0.7 the image came out grey and flat.
