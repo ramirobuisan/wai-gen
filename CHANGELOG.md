@@ -8,6 +8,13 @@
   oversaturation. The preset follows the model card: 832×1216, Euler, 28 steps, CFG 4.5, NoobAI's quality tags and
   negative prompt. Faster hi-res guidance works on it (hi-res pass about 23 % shorter, same look); the Step cache
   stays off because it needs Euler a. WAI v16 and NoobAI-XL 1.1 give the same images as before.
+- **Software Update window**: when an automatic check finds a new version, a window opens with what's new (the release
+  notes), **Later** and **Install and Relaunch**, with the download progress. **Check for Updates…** and the toolbar's
+  **Update to …** button open it too. A copy signed with your own certificate signs updates with it, so macOS keeps
+  its Local Network permission.
+- **Welcome to WAI Gen**: a setup window at the first launch (when something's missing) and in **WAI Gen → Setup…**.
+  It moves the app to Applications (updates need it there), picks the models folder and lists each model's files,
+  the upscaler and the face detector as ready or missing, with a **Get It** button to each missing file's page.
 
 ## 0.4.0 (2026-11-22)
 

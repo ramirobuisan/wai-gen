@@ -216,5 +216,21 @@ enum ModelCatalog {
                 + "832x1216, CFG Rescale ~0.7 recommended, zero terminal SNR"),
     ]
 
+    /// Where each model file comes from (the setup window's "Get It" buttons), by path in the models folder.
+    static let sources: [String: (site: String, url: URL)] = [
+        "checkpoints/waiIllustriousSDXL_v160.safetensors": ("Civitai", URL(string: "https://civitai.com/models/827184")!),
+        "checkpoints/NoobAI-XL-v1.1.safetensors": ("Hugging Face", URL(string: "https://huggingface.co/Laxhar/noobai-XL-1.1")!),
+        "checkpoints/noobaiXLNAIXL_vPred10Version.safetensors":
+            ("Civitai", URL(string: "https://civitai.com/models/833294?modelVersionId=1190596")!),
+        "diffusion_models/waiANIMA_v10Base10.safetensors": ("Civitai", URL(string: "https://civitai.com/models/2544636")!),
+        "text_encoders/qwen_3_06b_base.safetensors":
+            ("Hugging Face", URL(string: "https://huggingface.co/circlestone-labs/Anima/tree/main/split_files/text_encoders")!),
+        "vae/qwen_image_vae.safetensors":
+            ("Hugging Face", URL(string: "https://huggingface.co/circlestone-labs/Anima/tree/main/split_files/vae")!),
+        "upscale_models/RealESRGAN_x4plus_anime_6B.pth":
+            ("GitHub", URL(string: "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.2.4")!),
+        "detectors/face_yolov8m.safetensors": ("the README", URL(string: "https://github.com/ramirobuisan/wai-gen#models")!),
+    ]
+
     static func preset(_ id: String) -> ModelPreset { presets.first { $0.id == id } ?? presets[0] }
 }

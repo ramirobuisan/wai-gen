@@ -2,11 +2,13 @@ import AppKit
 import CryptoKit
 import Foundation
 import Observation
+import Security
 
 /// Updates from the GitHub releases of ramirobuisan/wai-gen. The Stable channel follows releases; Beta also takes
 /// pre-releases. The download (the release's WAI-Gen.zip) must match GitHub's size and SHA-256, be WAI Gen (same
 /// bundle id, the release's version) and pass `codesign --verify`; then it replaces this app in place and the app
-/// reopens. Models, images and settings live outside the app, so they stay.
+/// reopens. Models, images and settings live outside the app, so they stay. When this copy is signed with a
+/// certificate this Mac has (not ad hoc), the update is signed with it too, so macOS keeps its permissions.
 @MainActor @Observable
 final class Updater {
     enum Channel: String, CaseIterable, Identifiable {
@@ -43,6 +45,12 @@ final class Updater {
     static let lastCheckKey = "updateLastCheck"
 
     private(set) var state: State = .idle
+    /// The release being downloaded or installed (`state` no longer carries it then).
+    private(set) var installing: Release?
+    /// 0...1 while downloading, when the size is known.
+    private(set) var downloadProgress: Double?
+    /// Goes up when an automatic check finds a new version: the main window opens the Software Update window.
+    private(set) var announced = 0
     private(set) var lastCheck: Date? = UserDefaults.standard.object(forKey: Updater.lastCheckKey) as? Date
     var channel: Channel = Channel(rawValue: UserDefaults.standard.string(forKey: Updater.channelKey) ?? "") ?? .stable {
         didSet {
@@ -71,14 +79,15 @@ final class Updater {
         timer = Task { [weak self] in
             while !Task.isCancelled {
                 if let self, self.automatic, Date().timeIntervalSince(self.lastCheck ?? .distantPast) > 20 * 3600 {
-                    await self.check()
+                    await self.check(automatic: true)
                 }
                 try? await Task.sleep(for: .seconds(6 * 3600))
             }
         }
     }
 
-    func check() async {
+    /// `automatic`: a background check; a newer version found then announces itself (`announced`).
+    func check(automatic: Bool = false) async {
         switch state {
         case .checking, .downloading, .installing: return
         default: break
@@ -93,6 +102,7 @@ final class Updater {
                 .max { Self.isNewer($1.version, than: $0.version) }
             if let newest, Self.isNewer(newest.version, than: Self.currentVersion) {
                 state = .available(newest)
+                if automatic { announced += 1 }
             } else {
                 state = .upToDate
             }
@@ -103,14 +113,19 @@ final class Updater {
 
     /// Downloads, checks and installs `release`, then reopens the app. The caller makes sure nothing is generating.
     func install(_ release: Release) async {
+        installing = release
+        downloadProgress = nil
         state = .downloading
         do {
-            let zip = try await Self.download(release)
+            let zip = try await Self.download(release) { fraction in
+                Task { @MainActor [weak self] in self?.downloadProgress = fraction }
+            }
             state = .installing
             let target = Bundle.main.bundleURL
             try await Task.detached { try Self.replace(target, withAppIn: zip, version: release.version) }.value
             try Self.relaunch(target)
         } catch {
+            installing = nil
             state = .failed("Couldn't install \(release.version): \(error.localizedDescription)")
         }
     }
@@ -185,10 +200,23 @@ final class Updater {
         var errorDescription: String? { message }
     }
 
-    nonisolated private static func download(_ release: Release) async throws -> URL {
+    /// Reports the download's progress (0...1) to `progress`.
+    private final class ProgressReporter: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        let report: @Sendable (Double) -> Void
+        var observation: NSKeyValueObservation?
+        init(_ report: @escaping @Sendable (Double) -> Void) { self.report = report }
+        func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+            observation = task.progress.observe(\.fractionCompleted) { [report] p, _ in report(p.fractionCompleted) }
+        }
+    }
+
+    nonisolated private static func download(_ release: Release,
+                                             progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         var request = URLRequest(url: release.asset, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-        let (file, response) = try await URLSession.shared.download(for: request)
+        let reporter = ProgressReporter(progress)
+        let (file, response) = try await URLSession.shared.download(for: request, delegate: reporter)
+        reporter.observation = nil
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw UpdateError("the download answered \(status)") }
         let zip = FileManager.default.temporaryDirectory.appendingPathComponent("WAI-Gen-\(release.version)-\(UUID().uuidString).zip")
@@ -225,7 +253,40 @@ final class Updater {
             throw UpdateError("the download is version \(info["CFBundleShortVersionString"] ?? "?"), not \(version)")
         }
         try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+        // sign it like the running copy, so macOS keeps this Mac's permissions (Local Network); the release
+        // signature stays if that fails
+        if let identity = runningSigningIdentity() {
+            do { try run("/usr/bin/codesign", ["--force", "--deep", "--sign", identity, app.path]) } catch {
+                NSLog("WAI Gen update: re-signing with this Mac's certificate failed, keeping the release signature")
+            }
+        }
         _ = try fm.replaceItemAt(target, withItemAt: app, backupItemName: nil, options: [])
+    }
+
+    /// SHA-1 of the certificate this copy is signed with, when it's a real certificate (not ad hoc) whose private
+    /// key is in this Mac's keychain; nil otherwise.
+    nonisolated static func runningSigningIdentity() -> String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess, let code
+        else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let leaf = (dict[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
+        else { return nil }
+        let sha1 = Insecure.SHA1.hash(data: SecCertificateCopyData(leaf) as Data)
+            .map { String(format: "%02X", $0) }.joined()
+        // only if this Mac can actually sign with it
+        let out = Pipe()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-identity", "-v", "-p", "codesigning"]
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let listing = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        return listing.contains(sha1) ? sha1 : nil
     }
 
     nonisolated private static func run(_ tool: String, _ arguments: [String]) throws {
@@ -245,7 +306,7 @@ final class Updater {
     }
 
     /// Quits and opens the (new) app at `target` once this process has gone.
-    private static func relaunch(_ target: URL) throws {
+    static func relaunch(_ target: URL) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", "while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.2; done; "

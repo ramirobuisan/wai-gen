@@ -33,7 +33,7 @@ struct UpdateSettingsSection: View {
                         Button("Install and Relaunch") { Task { await updater.install(release) } }
                             .buttonStyle(.borderedProminent)
                             .disabled(busy)
-                        Link("Release page", destination: release.page)
+                        Link("View on GitHub", destination: release.page)
                         Spacer()
                         if busy {
                             Text(model.servingClient != nil ? "After the other Mac's image" : "After the queued images")
@@ -62,7 +62,10 @@ struct UpdateSettingsSection: View {
             Label("Up to date", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
         case .available: EmptyView()
         case .downloading:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Downloading…").font(.caption) }
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(model.updater.downloadProgress.map { "Downloading… \(Int($0 * 100)) %" } ?? "Downloading…").font(.caption)
+            }
         case .installing:
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Installing…").font(.caption) }
         case .failed(let message):
@@ -72,14 +75,14 @@ struct UpdateSettingsSection: View {
     }
 }
 
-/// App menu → Check for Updates…: opens Settings and checks.
+/// App menu → Check for Updates…: opens the Software Update window and checks.
 struct CheckForUpdatesButton: View {
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     let updater: Updater
 
     var body: some View {
         Button("Check for Updates…") {
-            openSettings()
+            openWindow(id: SoftwareUpdateView.windowID)
             Task { await updater.check() }
         }
     }

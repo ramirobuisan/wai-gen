@@ -46,7 +46,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1
+# SIGN_ID: a code-signing certificate on this Mac (keeps macOS permissions such as Local Network across builds and
+# updates: the in-app updater re-signs updates with the certificate the running copy has); "-" = ad hoc (releases)
+codesign --force --deep --sign "${SIGN_ID:--}" "$APP" >/dev/null 2>&1
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
 
 if [[ "${1:-}" == "--install" ]]; then

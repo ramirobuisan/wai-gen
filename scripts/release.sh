@@ -18,7 +18,7 @@ git fetch -q origin
 git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null && { echo "v$VERSION already exists: bump VERSION"; exit 1; }
 head -20 CHANGELOG.md | grep -q "^## $VERSION" || { echo "CHANGELOG.md needs a '## $VERSION' section at the top"; exit 1; }
 
-scripts/make-app.sh
+SIGN_ID=- scripts/make-app.sh   # releases are always ad hoc (no certificate from this Mac in them)
 rm -f build/WAI-Gen.zip
 ditto -c -k --keepParent "build/WAI Gen.app" build/WAI-Gen.zip
 

@@ -26,6 +26,7 @@ struct WAIGenApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesButton(updater: model.updater)
+                SetupButton()
             }
             CommandGroup(after: .newItem) {
                 Button("Generate") { model.generate() }
@@ -100,6 +101,24 @@ struct WAIGenApp: App {
             }
         }
 
+        Window("Software Update", id: SoftwareUpdateView.windowID) {
+            SoftwareUpdateView()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
+        .commandsRemoved()
+
+        Window("Welcome to WAI Gen", id: SetupView.windowID) {
+            SetupView()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
+        .commandsRemoved()
+
         Settings {
             SettingsView()
                 .environment(model)
@@ -109,7 +128,7 @@ struct WAIGenApp: App {
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         @Bindable var model = model
@@ -138,10 +157,10 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if let update = model.updater.available {
-                    Button { openSettings() } label: {
+                    Button { openWindow(id: SoftwareUpdateView.windowID) } label: {
                         Label("Update to \(update.version)", systemImage: "arrow.down.circle")
                     }
-                    .help("WAI Gen \(update.version) is available: install it in Settings")
+                    .help("WAI Gen \(update.version) is available: see what's new and install it")
                 }
                 if model.queueCount > 0 {
                     Menu {
@@ -171,6 +190,14 @@ struct ContentView: View {
                 }
                 .help("Show or hide the inspector (⌥⌘I)")
             }
+        }
+        // an automatic check found a new version: show it (as LocalType does)
+        .onChange(of: model.updater.announced) { _, _ in openWindow(id: SoftwareUpdateView.windowID) }
+        // first launch: the setup window, when the app isn't in Applications or no model is there yet
+        .task {
+            guard !UserDefaults.standard.bool(forKey: SetupView.shownKey) else { return }
+            UserDefaults.standard.set(true, forKey: SetupView.shownKey)
+            if SetupView.needsAttention(model) { openWindow(id: SetupView.windowID) }
         }
         .alert("Something went wrong", isPresented: Binding(
             get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {

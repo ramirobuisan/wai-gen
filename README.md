@@ -81,12 +81,20 @@ Download `WAI-Gen.zip` from [Releases](https://github.com/ramirobuisan/wai-gen/r
 **WAI Gen.app** to Applications (or ~/Applications). The app isn't notarized: the first time, macOS refuses to open
 it; go to **System Settings → Privacy & Security** and press **Open Anyway** (once).
 
-After that it updates itself from this repository's releases: **Settings → Updates** (or **WAI Gen → Check for
-Updates…**). The **Stable** channel follows releases; **Beta** also takes pre-releases. With automatic checks on
-(the default) it looks once a day and shows an **Update to x.y.z** button in the toolbar. Installing downloads the
+The first time it opens, the **Welcome to WAI Gen** window shows what's there and what's missing: whether the app is
+in Applications (a **Move to Applications** button puts it there, which updates need), the models folder, each model's
+files, the upscaler and the face detector, with a **Get It** button to each missing file's download page. Open it
+again from **WAI Gen → Setup…**.
+
+After that it updates itself from this repository's releases. With automatic checks on (the default) it looks once
+a day; when there's a new version the **Software Update** window opens with what's new, **Later** and **Install and
+Relaunch** (also **WAI Gen → Check for Updates…** and the **Update to x.y.z** button in the toolbar). The channel
+is in **Settings → Updates**: **Stable** follows releases, **Beta** also takes pre-releases. Installing downloads the
 release's `WAI-Gen.zip`, checks its size and SHA-256 against GitHub's, that it is WAI Gen at that version and that
 its signature is intact, swaps it in place and reopens the app. Models, images and settings live outside the app
-and stay. It waits for queued images (and other Macs' jobs) to finish first.
+and stay. It waits for queued images (and other Macs' jobs) to finish first. When your copy is signed with your own
+certificate (`SIGN_ID="<certificate>" scripts/make-app.sh`), updates are signed with it too, so macOS keeps its
+Local Network permission; releases are always ad hoc.
 
 Releasing (maintainers): bump `VERSION`, add a `## <version>` section at the top of `CHANGELOG.md` (it becomes
 the release notes), commit and push, then `scripts/release.sh` (or `scripts/release.sh --beta` for a
