@@ -100,6 +100,9 @@ let stepCacheThreshold = take("--step-cache").flatMap(Float.init)   // EasyCache
 let guidanceInterval = take("--guidance-interval").map { $0.split(separator: ",").compactMap { Float(String($0)) } }
 let hiresNoGuidance = flag("--hires-no-guidance")
 let hiresGuidanceEvery = take("--hires-guidance-every").flatMap(Int.init)   // 2 = guidance every other hi-res call (both models)
+// WAI v16 experiments: base-pass guidance every N steps below sigma S ("2,1.0"); ToDo from N attention positions
+let baseGuidance = take("--base-guidance-every").map { $0.split(separator: ",").compactMap { Float(String($0)) } }
+let todoMinTokens = take("--todo").flatMap(Int.init)
 let previewDir = take("--preview-dir")            // save every step's live preview here
 let refinePath = take("--refine")                 // upscale + detail pass on an existing image (gallery Upscale)
 let refineScale = take("--refine-scale").flatMap(Double.init) ?? 1.5
@@ -627,6 +630,11 @@ if let diffusionPath {
     }
     params.hiresGuidance = !hiresNoGuidance
     if let hiresGuidanceEvery { params.hiresGuidanceEvery = hiresGuidanceEvery }
+    if let b = baseGuidance {
+        guard b.count == 2 else { fail("--base-guidance-every N,sigma") }
+        (params.baseGuidanceEvery, params.baseGuidanceReuseBelow) = (Int(b[0]), b[1])
+    }
+    if let todoMinTokens { setToDoMinTokens(todoMinTokens) }
 
     let tLoad = Date()
     let engine: WaiSDXL

@@ -40,6 +40,10 @@ public struct SDXLParameters: Sendable {
     /// CFG Rescale (Lin et al. 2023): 0 = off, > 0 = on with ComfyUI's 0.7 blend, recommended for v-prediction
     /// models. Only applied with `prediction == .v` and on steps that use CFG.
     public var cfgRescale: Float = 0
+    /// Experimental: the base pass computes guidance on every n-th step once sigma <= `baseGuidanceReuseBelow`
+    /// (reusing the last direction in between); above it every step is guided.
+    public var baseGuidanceEvery = 1
+    public var baseGuidanceReuseBelow: Float = 1
 
     public init(prompt: String) { self.prompt = prompt }
 
@@ -73,6 +77,9 @@ public enum GenerationPhase: String, Sendable { case encode, sample, hires, deco
 
 /// Thrown by `WaiSDXL.generate` when the caller cancels.
 public struct WaiCancelled: Error {}
+
+/// Experimental ToDo token downsampling (see `UNetModel.todoMinTokens`); 0 = off. Call before generating.
+public func setToDoMinTokens(_ n: Int) { UNetModel.todoMinTokens = n }
 
 public final class WaiSDXL {
     public let checkpoint: URL
@@ -167,7 +174,9 @@ public final class WaiSDXL {
         guard var latent = sample(
             p.sampler,
             denoise: denoiser(context: context, pooled: pooled, cfg: p.cfg, width: w8, height: h8, cache: cache,
-                              guided: p.guidanceRule, prediction: p.prediction, cfgRescale: p.cfgRescale),
+                              guided: p.guidanceRule ?? (p.baseGuidanceEvery > 1 ? { _ in true } : nil),
+                              guidanceEvery: p.baseGuidanceEvery, reuseBelow: p.baseGuidanceReuseBelow,
+                              prediction: p.prediction, cfgRescale: p.cfgRescale),
             x: x, sigmas: sigmas, isCancelled: isCancelled, preview: stepPreview, progress: { progress(.sample, $0, $1) })
         else { throw WaiCancelled() }
         tm.skippedSteps += cache?.skipped ?? 0
@@ -312,9 +321,10 @@ public final class WaiSDXL {
     /// UNet once on the prompt. With a rule the step cache works on the guided prediction, not the CFG pair.
     /// `guidanceEvery` > 1: guidance is computed on every n-th guided call; the calls between run the UNet on
     /// the prompt alone and add the last guidance direction: eps_c + (cfg − 1)(eps_c − eps_u)_last.
+    /// `reuseBelow`: only guided calls at sigma <= this take part in that rhythm (experimental base-pass reuse).
     func denoiser(context: MLXArray, pooled: MLXArray, cfg: Float, width: Int, height: Int,
                   cache: StepCache? = nil, guided: ((Float) -> Bool)? = nil, guidanceEvery: Int = 1,
-                  prediction: Prediction = .epsilon, cfgRescale: Float = 0) -> Denoiser {
+                  reuseBelow: Float = .infinity, prediction: Prediction = .epsilon, cfgRescale: Float = 0) -> Denoiser {
         let ids = MLXArray([Float(height), Float(width), 0, 0, Float(height), Float(width)])
             .reshaped(1, 6)
         let textTime = (pooled, tiled(ids, repetitions: [2, 1]).asType(dtype))
@@ -354,8 +364,14 @@ public final class WaiSDXL {
                 let x1 = (x * cIn).asType(dtype)
                 let predict: () -> MLXArray = {
                     let wantsGuidance = guided(sigma)
-                    defer { if wantsGuidance { reuse.calls += 1 } }
-                    if wantsGuidance, reuse.direction == nil || reuse.calls % max(guidanceEvery, 1) == 0 {
+                    // only calls at sigma <= reuseBelow take part in the every-n-th rhythm
+                    let reusable = wantsGuidance && guidanceEvery > 1 && sigma <= reuseBelow
+                    var full = wantsGuidance
+                    if reusable {
+                        full = reuse.direction == nil || reuse.calls % guidanceEvery == 0
+                        reuse.calls += 1
+                    }
+                    if full {
                         let xIn = concatenated([x1, x1], axis: 0)
                         let timesteps = MLXArray([t, t])
                         let eps = compiled.map { $0([xIn, timesteps, context, textTime.0, textTime.1])[0] }
@@ -367,7 +383,7 @@ public final class WaiSDXL {
                     let timesteps = MLXArray([t])
                     let epsC = compiled.map { $0([x1, timesteps, condContext, condText.0, condText.1])[0] }
                         ?? unet(x1, timestep: timesteps, encoderX: condContext, textTime: condText)
-                    if wantsGuidance, let direction = reuse.direction {
+                    if reusable, let direction = reuse.direction {
                         return rescaled(epsC + (cfg - 1) * direction, cond: epsC)
                     }
                     return epsC

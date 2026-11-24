@@ -15,6 +15,8 @@ public enum SchedulerKind: String, CaseIterable, Codable, Sendable {
     case normal
     case karras
     case simple
+    /// NVIDIA's Align Your Steps schedule for SDXL (10 steps, log-linear interpolated for other counts)
+    case ays
 }
 
 /// What the UNet predicts each step. `.v` checkpoints (NoobAI-XL V-Pred 1.0) also need the
@@ -114,6 +116,22 @@ struct DiscreteSchedule {
             let ss = Float(sigmas.count) / Float(steps)
             var out = (0 ..< steps).map { i in sigmas[sigmas.count - 1 - Int(Float(i) * ss)] }
             out.append(0)
+            return out
+        case .ays:
+            // research.nvidia.com/labs/toronto-ai/AlignYourSteps (SDXL), as ComfyUI's AlignYourStepsScheduler:
+            // log-linear interpolation to steps + 1 levels, the last one set to 0
+            let base: [Float] = [14.615, 6.315, 3.771, 2.181, 1.342, 0.862, 0.555, 0.380, 0.234, 0.113, 0.029]
+            var out = base
+            if steps + 1 != base.count {
+                let ys = base.reversed().map { log($0) }
+                out = (0 ... steps).map { i -> Float in
+                    let x = Float(i) / Float(steps) * Float(ys.count - 1)
+                    let lo = min(Int(x), ys.count - 2)
+                    let w = x - Float(lo)
+                    return exp(ys[lo] * (1 - w) + ys[lo + 1] * w)
+                }.reversed()
+            }
+            out[out.count - 1] = 0
             return out
         }
     }
