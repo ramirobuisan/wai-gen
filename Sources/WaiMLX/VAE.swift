@@ -258,6 +258,8 @@ class Autoencoder: Module {
 
     let latentChannels: Int
     let scalingFactor: Float
+    /// false for VAEs without quant_conv / post_quant_conv (Flux / Z-Image)
+    var quantProjections = true
     let encoder: VAEncoder
     let decoder: VADecoder
 
@@ -288,12 +290,12 @@ class Autoencoder: Module {
 
     func decode(_ z: MLXArray) -> MLXArray {
         let z = z / scalingFactor
-        return decoder(postQuantProjection(z))
+        return decoder(quantProjections ? postQuantProjection(z) : z)
     }
 
     func encode(_ x: MLXArray) -> (MLXArray, MLXArray) {
         var x = encoder(x)
-        x = quantProjection(x)
+        if quantProjections { x = quantProjection(x) }
         var (mean, logvar) = x.split(axis: -1)
         mean = mean * scalingFactor
         logvar = logvar + 2 * log(scalingFactor)

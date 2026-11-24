@@ -269,6 +269,36 @@ private func apply(_ weights: [(String, MLXArray)], to model: Module) throws {
     try model.update(parameters: ModuleParameters.unflattened(weights), verify: .none)
 }
 
+/// An SD-layout (ldm) VAE stored under `prefix` in `all` -> Autoencoder, in bfloat16 (SDXL's `first_stage_model.`,
+/// Z-Image's Flux VAE under `vae.`).
+func loadLDMVAE(_ all: [String: MLXArray], prefix: String, configuration: AutoencoderConfiguration) throws -> Autoencoder {
+    var vaeWeights = [(String, MLXArray)]()
+    for (k, v) in all where k.hasPrefix(prefix) {
+        var key = String(k.dropFirst(prefix.count))
+        var value = v.asType(.bfloat16)
+        for (ldm, dif) in vaeLdmToDiffusers where key.contains(ldm) {
+            key = key.replacingOccurrences(of: ldm, with: dif)
+        }
+        if key.contains("mid_block.attentions.0.") {
+            // single-head attention stored as 1x1 convs -> linear
+            for (ldm, dif) in [("norm.", "group_norm."), ("q.", "to_q."), ("k.", "to_k."),
+                               ("v.", "to_v."), ("proj_out.", "to_out.0.")] {
+                let marker = "mid_block.attentions.0."
+                if key.hasPrefix(marker + ldm) || key.contains("." + marker + ldm) {
+                    key = key.replacingOccurrences(of: marker + ldm, with: marker + dif)
+                    break
+                }
+            }
+            if value.ndim == 4 { value = value.reshaped(value.dim(0), value.dim(1)) }
+        }
+        vaeWeights += vaeRemap(key: key, value: value)
+    }
+    let vae = Autoencoder(configuration: configuration)
+    vae.quantProjections = vaeWeights.contains { $0.0.hasPrefix("quant_proj") }
+    try apply(vaeWeights, to: vae)
+    return vae
+}
+
 /// Load a single-file SDXL checkpoint (WAI-illustrious) into MLX modules.
 /// UNet and text encoders use `dType` (fp16); the VAE uses bfloat16 (SDXL's VAE overflows in
 /// fp16; bf16 has fp32's range, like ComfyUI's default on Apple silicon).
@@ -344,29 +374,8 @@ func loadSDXLCheckpoint(url: URL, dType: DType = .float16) throws -> SDXLCompone
     try apply(clipGWeights, to: clipG)
 
     // --- VAE (bfloat16)
-    var vaeWeights = [(String, MLXArray)]()
-    for (k, v) in all where k.hasPrefix(vaePrefix) {
-        var key = String(k.dropFirst(vaePrefix.count))
-        var value = v.asType(.bfloat16)
-        for (ldm, dif) in vaeLdmToDiffusers where key.contains(ldm) {
-            key = key.replacingOccurrences(of: ldm, with: dif)
-        }
-        if key.contains("mid_block.attentions.0.") {
-            // single-head attention stored as 1x1 convs -> linear
-            for (ldm, dif) in [("norm.", "group_norm."), ("q.", "to_q."), ("k.", "to_k."),
-                               ("v.", "to_v."), ("proj_out.", "to_out.0.")] {
-                let marker = "mid_block.attentions.0."
-                if key.hasPrefix(marker + ldm) || key.contains("." + marker + ldm) {
-                    key = key.replacingOccurrences(of: marker + ldm, with: marker + dif)
-                    break
-                }
-            }
-            if value.ndim == 4 { value = value.reshaped(value.dim(0), value.dim(1)) }
-        }
-        vaeWeights += vaeRemap(key: key, value: value)
-    }
-    let vae = Autoencoder(configuration: try bundledJSON("sdxl_vae", as: AutoencoderConfiguration.self))
-    try apply(vaeWeights, to: vae)
+    let vae = try loadLDMVAE(all, prefix: vaePrefix,
+                             configuration: try bundledJSON("sdxl_vae", as: AutoencoderConfiguration.self))
 
     // --- checkpoint markers: NoobAI-XL V-Pred 1.0 stores empty `v_pred`/`ztsnr` tensors in its
     // header; they say the model predicts v and was trained with zero terminal SNR sigmas.

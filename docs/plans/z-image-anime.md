@@ -152,3 +152,19 @@ Facts from ComfyUI's `_forward` you must match:
     (0,0,0), unpatchify takes tokens capLen ..< capLen + h·w; q/k RMSNorm eps = float32 epsilon (ComfyUI RMSNorm
     eps=None), block norms 1e-5; RoPE tables built from the position arrays at once; `pad_to_patch_size` pads
     circularly at the bottom/right only.
+- **Steps 3-5 and 8 (Claude, 2026-11-24).** Flux VAE: the SD `Autoencoder` with 16 latent channels and no quant
+  projections (`quantProjections`, set from the weights), loaded by `loadLDMVAE(prefix: "vae.")`, the SDXL loader's VAE
+  code moved into a shared function. `--zimage-check`: VAE decode of the raw 64×64 crop vs ComfyUI's `vae.decode`:
+  cosine min 0.99990, mean abs error 0.89 %. `WaiZImage` (`Sources/WaiMLX/WaiZImage.swift`): the flow table with shift 3
+  (same as WAI-ANIMA's), schedulers `simple` and `beta` (ComfyUI's beta_scheduler, alpha = beta = 0.6, via a
+  regularized-incomplete-beta inverse), samplers Euler, flow Euler a (ComfyUI `sample_euler_ancestral_RF`) and DPM++ 2M,
+  CFG 1 = one DiT call per step (cfg > 1: negative prompt, or zeros like ConditioningZeroOut), Flux latent format
+  (z / 0.3611 + 0.1159) before the VAE. CLI: `--zimage <aio> -p ... [--zimage-noise file:key]`.
+  - End to end vs ComfyUI on the same noise (`scripts/zimage_sample_reference.py`: `comfy.sample.sample`, Euler, beta,
+    9 steps, CFG 1, 1024²): beta sigmas [1.0, 0.98383, 0.94649, 0.88776, 0.80362, 0.68831, 0.53351, 0.33901,
+    0.13139, 0]; images 32.2 dB PSNR apart (the same picture; bf16 drift over 9 steps).
+  - Time, M5 Max, 9 steps Euler a + beta, CFG 1 (text encode + sampling + VAE): 1024² 13.5-16.4 s, 832×1216 13.8-15.1 s
+    (ComfyUI on MPS: 18.9 s warm at 1024²). DiT forward ~1.2 s at 1024².
+  - Regression (step 8): WAI v16 (hi-res, step cache, guidance every 2) and WAI-ANIMA, second run of `--repeat 2`,
+    pixel-identical to a build of main a0dea7b. NoobAI-XL uses the same SDXL loader as WAI v16.
+  - Still to do: step 6 (compile, memory), step 7 (app preset), the Flux latent preview.

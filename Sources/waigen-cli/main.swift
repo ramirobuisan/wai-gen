@@ -2,6 +2,10 @@
 //
 // WAI-illustrious SDXL:
 //   waigen-cli --model <checkpoint.safetensors> --prompt "..." [options]
+// Z-Image (Turbo, all-in-one checkpoint):
+//   waigen-cli --zimage <z-image-anime-aio-bf16.safetensors> -p "..." [-W 832 -H 1216] [--steps 9] [--cfg 1]
+//              [--sampler euler_a|euler|dpm++2m] [--scheduler beta|simple] [--zimage-noise ref.safetensors:noise]
+//              [--zimage-check ref.safetensors] (text encoder, DiT and VAE against scripts/zimage_reference.py)
 // WAI-ANIMA:
 //   waigen-cli --diffusion-model <anima.safetensors> --llm <qwen_3_06b_base.safetensors>
 //              --vae <qwen_image_vae.safetensors> --prompt "..." [options]
@@ -114,7 +118,8 @@ let animaDType: DType = take("--anima-dtype") == "f16" ? .float16 : .bfloat16
 let vaeRoundtrip = take("--vae-roundtrip")        // WAI-ANIMA: encode + decode an image with the VAE
 let esrganTest = take("--esrgan-test")            // upscale an image with --hires-upscaler and time it
 let zimagePath = take("--zimage")                 // Z-Image AIO checkpoint (DiT + Qwen3-4B + Flux VAE)
-let zimageCheck = take("--zimage-check")          // ref.safetensors: verify the Z-Image text encoder against it
+let zimageCheck = take("--zimage-check")          // ref.safetensors: check text encoder, DiT and VAE against ComfyUI
+let zimageNoise = take("--zimage-noise")          // file.safetensors:key — Z-Image start noise (parity with ComfyUI)
 let benchConv = flag("--bench-conv")              // 3x3 convs: MLX's conv2d vs matmul rewrites (time + diff)
 let serveTest = take("--serve-test")              // port: a test generator (dummy images) to check the protocol
 let remoteAddress = take("--remote")             // host[:port] of a Mac sharing WAI Gen: generate there
@@ -369,62 +374,89 @@ if let esrganTest {
     finish(0)
 }
 
-if let checkPath = zimageCheck {
-    // Step 1 of docs/plans/z-image-anime.md: verify our Z-Image text encoder against the ComfyUI reference
-    // tensors (step 0): the token ids must match and the conditioning must be within bf16 rounding.
-    guard let zimagePath else { fail("--zimage-check needs --zimage <aio.safetensors>") }
-    guard !prompt.isEmpty else { fail("--zimage-check needs the prompt the reference was made with (-p)") }
-    do {
-        let tl = Date()
-        let encoder = try Qwen3TextEncoder(url: URL(fileURLWithPath: zimagePath),
-                                           keyPrefix: "text_encoders.qwen3_4b.transformer.model.")
-        print(String(format: "Qwen3-4B text encoder (%d layers, hidden %d, heads %d/%d kv) loaded in %.1fs",
-                     encoder.layers, encoder.hidden, encoder.heads, encoder.kvHeads, Date().timeIntervalSince(tl)))
-        let te = ZImageTextEncoder(encoder: encoder, tokenizer: try AnimaTokenizer().qwen)
-        let t0 = Date()
-        let ours = te.encode(prompt)
-        print(String(format: "encoded %d tokens in %.2fs", ours.dim(0), Date().timeIntervalSince(t0)))
-        let ref = try loadArrays(url: URL(fileURLWithPath: checkPath))
-        guard let refTokens = ref["tokens"] else { fail("\(checkPath as NSString).lastPathComponent has no 'tokens' tensor") }
-        let refIds = refTokens.asArray(Int64.self).map { Int32($0) }
-        let ourIds = te.tokenize(prompt)
-        if ourIds == refIds {
-            print("token ids: identical (\(refIds.count))")
-        } else {
-            print("token ids: DIFFER (ours \(ourIds.count) vs reference \(refIds.count))")
-            print("  ours:  \(ourIds)")
-            print("  ref:   \(refIds)")
-        }
-        guard let refCond = ref["cond"] else { fail("\(checkPath as NSString).lastPathComponent has no 'cond' tensor") }
-        let r = refCond.asType(.float32), o = ours.asType(.float32).reshaped(r.shape)   // ours is [n, hidden]
-        guard o.shape == r.shape else { fail("cond shape \(o.shape) != reference \(r.shape)") }
-        let diff = abs(o - r)
-        let maxDiff = diff.max().item(Float.self)
-        let maxAbs = max(r.abs().max().item(Float.self), 1e-9)
-        print(String(format: "cond max abs diff %.6f, max abs ref %.3f, relative %.3e, mean abs diff %.6f",
-                     maxDiff, maxAbs, maxDiff / maxAbs, diff.mean().item(Float.self)))
-        print("cond " + similarity(o, r))
+if let zimagePath {
+    // ---------------- Z-Image (Turbo) AIO: docs/plans/z-image-anime.md
+    let tl = Date()
+    let zimage: WaiZImage
+    do { zimage = try WaiZImage(aio: URL(fileURLWithPath: zimagePath)) } catch { fail(error.localizedDescription) }
+    let te = zimage.textEncoder, dit = zimage.dit
+    print(String(format: "Z-Image loaded in %.1fs: Qwen3-4B %d layers (hidden %d), DiT %d+%d refiner + %d layers",
+                 Date().timeIntervalSince(tl), te.encoder.layers, te.encoder.hidden, dit.refinerLayers,
+                 dit.refinerLayers, dit.layers))
+    guard !prompt.isEmpty else { fail("-p is required") }
 
-        // step 2: the DiT on the reference's own noise and conditioning (isolates it from the text encoder)
-        if let noise = ref["noise"] {
-            let td = Date()
-            let dit = try ZImageDiT(url: URL(fileURLWithPath: zimagePath))
-            print(String(format: "DiT (%d layers, %d+%d refiner) loaded in %.1fs", dit.layers, dit.refinerLayers,
-                         dit.refinerLayers, Date().timeIntervalSince(td)))
-            var cases: [(String, MLXArray, Float)] = [("1024² σ1.0", noise, 1.0), ("1024² σ0.5", noise, 0.5)]
-            if let tall = ref["noise_832x1216"] { cases.append(("832×1216 σ0.5", tall, 0.5)) }
-            let refKeys = ["dit_out_s1.0", "dit_out_s0.5", "dit_out_832x1216_s0.5"]
-            for (i, (name, x, sigma)) in cases.enumerated() {
-                guard let expected = ref[refKeys[i]] else { continue }
-                let t0 = Date()
-                let out = dit(x, sigma: sigma, context: refCond)
-                eval(out)
-                let dt = Date().timeIntervalSince(t0)
-                print(String(format: "DiT %@: %.2fs, ", name, dt)
-                      + similarity(out.reshaped(16, -1), expected.reshaped(16, -1)))
+    if let checkPath = zimageCheck {
+        // steps 1-3: the text encoder, the DiT and the VAE against ComfyUI's tensors (scripts/zimage_reference.py)
+        do {
+            let ref = try loadArrays(url: URL(fileURLWithPath: checkPath))
+            guard let refTokens = ref["tokens"], let refCond = ref["cond"] else { fail("\(checkPath): no tokens / cond") }
+            let refIds = refTokens.asArray(Int64.self).map { Int32($0) }
+            let ourIds = te.tokenize(prompt)
+            print(ourIds == refIds ? "token ids: identical (\(refIds.count))"
+                                   : "token ids: DIFFER\n  ours: \(ourIds)\n  ref:  \(refIds)")
+            let t0 = Date()
+            let ours = te.encode(prompt)
+            let r = refCond.asType(.float32), o = ours.asType(.float32).reshaped(r.shape)   // ours is [n, hidden]
+            print(String(format: "cond (%.2fs): ", Date().timeIntervalSince(t0)) + similarity(o, r))
+            if let noise = ref["noise"] {
+                var cases: [(String, MLXArray, Float, String)] = [("1024² σ1.0", noise, 1.0, "dit_out_s1.0"),
+                                                                  ("1024² σ0.5", noise, 0.5, "dit_out_s0.5")]
+                if let tall = ref["noise_832x1216"] { cases.append(("832×1216 σ0.5", tall, 0.5, "dit_out_832x1216_s0.5")) }
+                for (name, x, sigma, key) in cases {
+                    guard let expected = ref[key] else { continue }
+                    let t1 = Date()
+                    let out = dit(x, sigma: sigma, context: refCond)
+                    eval(out)
+                    print(String(format: "DiT %@ (%.2fs): ", name, Date().timeIntervalSince(t1))
+                          + similarity(out.reshaped(16, -1), expected.reshaped(16, -1)))
+                }
+                if let expected = ref["vae_decode_crop64"] {
+                    let t2 = Date()
+                    let img = zimage.decodeRaw(noise[0..., 0..., 0 ..< 64, 0 ..< 64])
+                    eval(img)
+                    print(String(format: "VAE decode 512² (%.2fs): ", Date().timeIntervalSince(t2))
+                          + similarity(img.transposed(0, 3, 1, 2).reshaped(3, -1), expected.transposed(0, 3, 1, 2).reshaped(3, -1)))
+                }
             }
+        } catch { fail(error.localizedDescription) }
+        finish(0)
+    }
+
+    // --zimage-noise file.safetensors:key: start from that noise (ComfyUI parity checks)
+    var startNoise: MLXArray? = nil
+    if let spec = zimageNoise {
+        let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let arrays = try? loadArrays(url: URL(fileURLWithPath: parts[0])), let n = arrays[parts[1]]
+        else { fail("--zimage-noise file.safetensors:key") }
+        startNoise = n
+    }
+    for run in 1 ... repeats {
+        var p = ZImageParameters(prompt: prompt)
+        p.negativePrompt = negative
+        if let width { p.width = width }
+        if let height { p.height = height }
+        if let steps { p.steps = steps }
+        if let cfg { p.cfg = cfg }
+        if let samplerName {
+            guard let s = AnimaSampler(rawValue: samplerName) else { fail("Z-Image sampler: euler_a, euler or dpm++2m") }
+            p.sampler = s
         }
-    } catch { fail(error.localizedDescription) }
+        if let schedulerName {
+            guard let s = ZImageScheduler(rawValue: schedulerName) else { fail("Z-Image scheduler: beta or simple") }
+            p.scheduler = s
+        }
+        p.seed = Int64(truncatingIfNeeded: seed &+ UInt64(run - 1))
+        let ts = Date()
+        do {
+            let out = try zimage.generate(p, noise: startNoise) { i, n in showProgress("sampling", i, n) }
+            FileHandle.standardError.write(Data("\n".utf8))
+            let img = RGBImage(out)
+            try Image(img.array).save(url: outputURL(run))
+            print(String(format: "run %d seed %lld | %dx%d, %d steps %@ %@, cfg %.1f | total %.2fs -> %@", run, p.seed,
+                         img.width, img.height, p.steps, p.sampler.rawValue, p.scheduler.rawValue, p.cfg,
+                         Date().timeIntervalSince(ts), outputURL(run).lastPathComponent))
+        } catch { fail(error.localizedDescription) }
+    }
     finish(0)
 }
 
