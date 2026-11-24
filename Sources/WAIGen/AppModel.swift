@@ -511,8 +511,17 @@ final class AppModel {
 
     /// Queue an upscale of a saved image: model upscaler + (optionally) a diffusion detail pass with
     /// the image's own prompt, seed, model and LoRAs, then face repair. Saved as a new image.
-    func upscale(_ item: GalleryItem, detail: Bool) {
-        guard let (tw, th) = upscaleTarget(item, detail: detail) else {
+    /// "Save as … wallpaper": upscaler, scale to cover the screen, centre crop to its exact resolution.
+    func saveWallpaper(_ item: GalleryItem, _ wall: Wallpaper) {
+        guard let (w, h) = Self.imageSize(item.url) else {
+            errorMessage = "Couldn't read \(item.url.lastPathComponent)."
+            return
+        }
+        upscale(item, detail: false, target: wall.coverSize(w, h), crop: (wall.screenWidth, wall.screenHeight))
+    }
+
+    func upscale(_ item: GalleryItem, detail: Bool, target: (Int, Int)? = nil, crop: (Int, Int)? = nil) {
+        guard let (tw, th) = target ?? upscaleTarget(item, detail: detail) else {
             errorMessage = "Couldn't read \(item.url.lastPathComponent)."
             return
         }
@@ -556,7 +565,8 @@ final class AppModel {
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
             loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview,
             stepCache: s.stepCache && p.allowsStepCache && upscaleSampler.supportsStepCache,
-            upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
+            upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail,
+                                    crop: crop.map { (width: $0.0, height: $0.1) }),
             artists: r.map { $0.artists ?? [] } ?? s.artists,
             hiresGuidanceEvery: detail && s.fastHiresGuidance && !p.defaults.distilled ? p.engine.fastHiresGuidanceEvery : 1)
         pending.append(job)
@@ -661,6 +671,15 @@ final class AppModel {
     }
 
     private func finish(_ job: GenerationJob, _ result: JobResult) {
+        var result = result
+        // wallpapers made on another Mac come back uncropped (the crop isn't part of the remote protocol)
+        if let c = job.upscale?.crop, result.image.width > c.width || result.image.height > c.height,
+           let cropped = result.image.cropping(to: CGRect(x: (result.image.width - c.width) / 2,
+                                                          y: (result.image.height - c.height) / 2,
+                                                          width: min(c.width, result.image.width),
+                                                          height: min(c.height, result.image.height))) {
+            result = JobResult(image: cropped, seconds: result.seconds, faceRepairSeconds: result.faceRepairSeconds)
+        }
         var record = GenerationRecord(
             modelID: job.preset.id, modelName: job.preset.name, engine: job.preset.engine.rawValue,
             positive: job.positive, negative: job.negative, characters: job.characters,

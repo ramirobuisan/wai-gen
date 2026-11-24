@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Save as wallpaper**: Image → "Save as iPhone Pro Max Wallpaper" / "Save as MacBook Pro 14" Wallpaper" (also in the
+  image's Upscale menu) upscales the image with the hi-res upscaler, scales it to cover the screen and crops the
+  centre to exactly 1320 × 2868 or 3024 × 1964, saved as a new image. With the wallpaper sizes it trims only a few
+  pixels; other sizes are cropped to the screen's shape.
+
 ## 0.6.0 (2026-11-24)
 
 - **Wallpaper sizes**: 704 × 1536 (iPhone Pro Max) and 1280 × 832 (MacBook Pro 14"), the screens' aspect ratios at the

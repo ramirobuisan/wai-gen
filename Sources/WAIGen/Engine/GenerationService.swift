@@ -23,6 +23,8 @@ struct UpscaleRequest: Sendable {
     let height: Int
     /// false = upscaler model / resize only, no diffusion pass
     let detailPass: Bool
+    /// then a centre crop to this size (wallpapers: width × height covers it)
+    var crop: (width: Int, height: Int)? = nil
 }
 
 /// A fully resolved request (prompt already assembled, seed fixed).
@@ -557,7 +559,11 @@ final class GenerationService: @unchecked Sendable {
             progress(.upscaling)
             var img = source
             if let u = job.hiresUpscaler { img = try modelUpscaler(u).upscale(img) }
-            return try result(img.resized(width: up.width, height: up.height), start: t0, faceRepairSeconds: nil)
+            img = img.resized(width: up.width, height: up.height)
+            if let c = up.crop {
+                img = img.cropped(x: (img.width - c.width) / 2, y: (img.height - c.height) / 2, width: c.width, height: c.height)
+            }
+            return try result(img, start: t0, faceRepairSeconds: nil)
         }
 
         let steps = job.hires?.steps ?? 20

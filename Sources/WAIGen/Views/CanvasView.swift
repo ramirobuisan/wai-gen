@@ -304,7 +304,12 @@ struct UpscaleMenu<Label: View>: View {
             }
             .disabled(model.settings.hiresUpscaler.isEmpty)
             Divider()
-            Text("Uses the hi-res scale, steps, denoise and upscaler from the inspector")
+            ForEach(Wallpaper.all) { wall in
+                Button("\(wall.device) wallpaper  (\(wall.screenWidth) × \(wall.screenHeight))") { model.saveWallpaper(item, wall) }
+                    .disabled(model.settings.hiresUpscaler.isEmpty)
+            }
+            Divider()
+            Text("Uses the hi-res scale, steps, denoise and upscaler from the inspector; wallpapers are upscaled and cropped to the screen")
         } label: {
             label()
         }

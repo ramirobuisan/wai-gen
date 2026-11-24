@@ -83,6 +83,10 @@ struct WAIGenApp: App {
                 Button("Upscale ×2 (Upscaler Only)") { if let s = model.selection { model.upscale(s, detail: false) } }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
                     .disabled(model.selection == nil)
+                ForEach(Wallpaper.all) { wall in
+                    Button("Save as \(wall.device) Wallpaper") { if let s = model.selection { model.saveWallpaper(s, wall) } }
+                        .disabled(model.selection == nil || model.settings.hiresUpscaler.isEmpty)
+                }
                 Divider()
                 Button("Use Prompt and Settings") { if let s = model.selection { model.reuse(s, seed: false) } }
                     .disabled(model.selection?.record == nil)

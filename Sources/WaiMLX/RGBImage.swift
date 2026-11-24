@@ -23,6 +23,23 @@ public struct RGBImage: Sendable {
     /// uint8 [H, W, 3]
     public var array: MLXArray { MLXArray(pixels, [height, width, 3], type: UInt8.self) }
 
+    /// The `width` × `height` region at (`x`, `y`), clamped to the image.
+    public func cropped(x: Int, y: Int, width w: Int, height h: Int) -> RGBImage {
+        let x0 = max(0, min(x, width - 1)), y0 = max(0, min(y, height - 1))
+        let cw = min(w, width - x0), ch = min(h, height - y0)
+        if x0 == 0, y0 == 0, cw == width, ch == height { return self }
+        var out = Data(count: cw * ch * 3)
+        out.withUnsafeMutableBytes { dst in
+            pixels.withUnsafeBytes { src in
+                for row in 0 ..< ch {
+                    let from = ((y0 + row) * width + x0) * 3
+                    dst.baseAddress!.advanced(by: row * cw * 3).copyMemory(from: src.baseAddress!.advanced(by: from), byteCount: cw * 3)
+                }
+            }
+        }
+        return RGBImage(width: cw, height: ch, pixels: out)
+    }
+
     /// High-quality resample (Core Graphics) to an exact size.
     public func resized(width w: Int, height h: Int) -> RGBImage {
         if w == width, h == height { return self }
