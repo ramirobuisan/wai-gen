@@ -13,6 +13,7 @@ ComfyUI (character picker, tag autocomplete, hi-res fix, face repair, AI prompt)
 | WAI-illustrious-SDXL v16 | **MLX** (Apple's ML framework), SDXL implemented in Swift |
 | NoobAI-XL 1.1 (EPS) | the same SDXL engine, with all of its speed-ups |
 | NoobAI-XL V-Pred 1.0 | the same SDXL engine with v-prediction, the zero-terminal-SNR schedule and CFG Rescale |
+| Z-Image Anime (Turbo) | **MLX**: Z-Image's NextDiT, Qwen3-4B text encoder and Flux VAE ported from ComfyUI (checked against it), 9 steps at CFG 1 |
 | WAI-ANIMA v1.0 | **MLX**: the Anima diffusion model, Qwen3 text encoder, Qwen-Image VAE, tokenizers and flow sampler ported from stable-diffusion.cpp (same seeds give the same images) |
 
 The ESRGAN upscaler and the YOLOv8 face detector run in MLX too.
@@ -122,6 +123,7 @@ Point **Settings → Models** at a folder with the ComfyUI layout (`~/ComfyUI-Sh
 | `checkpoints/waiIllustriousSDXL_v160.safetensors` | [WAI-illustrious-SDXL on Civitai](https://civitai.com/models/827184) |
 | `checkpoints/NoobAI-XL-v1.1.safetensors` | [Laxhar/noobai-XL-1.1](https://huggingface.co/Laxhar/noobai-XL-1.1) (optional) |
 | `checkpoints/noobaiXLNAIXL_vPred10Version.safetensors` | [NoobAI-XL V-Pred 1.0 on Civitai](https://civitai.com/models/833294?modelVersionId=1190596) (optional) |
+| `checkpoints/z-image-anime-aio-bf16.safetensors` | [Z-Image-Turbo-Anime AIO BF16 on Civitai](https://civitai.com/models/2259646?modelVersionId=2543657) (optional, 20.5 GB) |
 | `diffusion_models/waiANIMA_v10Base10.safetensors` | WAI-ANIMA on Civitai |
 | `text_encoders/qwen_3_06b_base.safetensors`, `vae/qwen_image_vae.safetensors` | [Comfy-Org](https://huggingface.co/Comfy-Org) repackaged files |
 | `upscale_models/RealESRGAN_x4plus_anime_6B.pth` | [Real-ESRGAN releases](https://github.com/xinntao/Real-ESRGAN/releases) |

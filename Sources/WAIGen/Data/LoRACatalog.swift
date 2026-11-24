@@ -12,10 +12,12 @@ struct LoRAFile: Identifiable, Hashable {
 
     /// Rough family check so the inspector can flag LoRAs made for other model types.
     func fits(_ engine: EngineKind) -> Bool? {
+        if engine == .zimage { return false }   // no LoRA support in the Z-Image engine yet
         guard let b = baseModel?.lowercased() else { return nil }
         switch engine {
         case .sdxl: return b.contains("sdxl") || b.contains("illustrious") || b.contains("noob") || b.contains("pony")
         case .anima: return b.contains("anima") || b.contains("cosmos")
+        case .zimage: return false
         }
     }
 }

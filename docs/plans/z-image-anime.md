@@ -168,3 +168,13 @@ Facts from ComfyUI's `_forward` you must match:
   - Regression (step 8): WAI v16 (hi-res, step cache, guidance every 2) and WAI-ANIMA, second run of `--repeat 2`,
     pixel-identical to a build of main a0dea7b. NoobAI-XL uses the same SDXL loader as WAI v16.
   - Still to do: step 6 (compile, memory), step 7 (app preset), the Flux latent preview.
+- **Step 7, app (Claude, 2026-11-24; branch rebased on main 5a91761).** `EngineKind.zimage` ("MLX (Z-Image)"), preset
+  `z-image-anime-turbo` "Z-Image Anime (Turbo)" (⌘5): 832×1216, 9 steps, CFG 1, Euler a, new `Scheduler.beta` (offered
+  for Z-Image only; Karras hidden for it), hi-res off by default (1.5×, 5 steps, denoise 0.35 when on). `WaiZImage` got
+  img2img (`initImage`, `strength`), masked repaint and `repairFaces` (WAI-ANIMA's approach) and a live preview (Flux
+  latent→RGB factors), so hi-res fix, gallery Upscale and face repair work; GenerationService loads/caches it like the
+  others. Step cache, Fast mode and Faster hi-res guidance are hidden and off for it (`EngineKind.supportsStepCache`);
+  LoRAs are marked as not supported and skipped. Setup window: Get It → Civitai 2259646.
+  Tested in an isolated app copy through the generator-sharing path (`waigen-cli --remote`): 832×1216 base 20.1 s
+  including the model load, 9 live previews; hi-res 1.5× + face repair 1248×1824 in 53.4 s (face repair 4.7 s); and
+  Generate from the app's menu with the preset. Images clean.

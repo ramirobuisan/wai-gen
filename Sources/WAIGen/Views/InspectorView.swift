@@ -88,16 +88,26 @@ struct InspectorView: View {
                 SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.steps) }, set: { model.settings.steps = Int($0) }),
                           range: 8 ... 60, step: 1, format: "%.0f")
                 SliderRow(title: "CFG", value: $model.settings.cfg, range: 1 ... 12, step: 0.5, format: "%.1f")
+                if preset.engine == .zimage {
+                    Text(model.settings.cfg <= 1
+                         ? "Turbo model: CFG 1 and ~9 steps. The negative prompt isn't used at CFG 1."
+                         : "Turbo model: made for CFG 1; above 1 each step takes twice as long.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Picker("Sampler", selection: $model.settings.sampler) {
                     ForEach(Sampler.allCases) { Text($0.label).tag($0) }
                 }
                 Picker("Schedule", selection: $model.settings.scheduler) {
-                    ForEach(Scheduler.allCases) { Text($0.label).tag($0) }
+                    ForEach(Scheduler.allCases.filter { $0.available(for: preset.engine) || $0 == model.settings.scheduler }) {
+                        Text($0.label).tag($0)
+                    }
                 }
                 SeedRow(seed: $model.settings.seed)
                 Stepper("Images: \(model.settings.batchCount)", value: $model.settings.batchCount, in: 1 ... 16)
                 Toggle("Live preview", isOn: $model.settings.livePreview)
                     .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
+                // Z-Image Turbo already runs ~9 steps: no Fast mode or step cache
+                if preset.engine != .zimage {
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Fast mode", isOn: $model.settings.fastMode)
                     Text("\(preset.defaults.fast.sampler.label) · \(preset.defaults.fast.scheduler.label) · \(preset.defaults.fast.steps) steps: about 30 % faster, a slightly different look")
@@ -113,6 +123,7 @@ struct InspectorView: View {
                             .font(.caption).foregroundStyle(.orange)
                     }
                 }
+                }
             }
 
             CollapsibleSection(title: "Hi-res fix", isExpanded: $openHires) {
@@ -123,6 +134,7 @@ struct InspectorView: View {
                     SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.hiresSteps) }, set: { model.settings.hiresSteps = Int($0) }),
                               range: 5 ... 40, step: 1, format: "%.0f")
                     SliderRow(title: "Denoise", value: $model.settings.hiresDenoise, range: 0.1 ... 0.8, step: 0.05, format: "%.2f")
+                    if preset.engine != .zimage {   // CFG 1: no guidance to reuse
                     VStack(alignment: .leading, spacing: 2) {
                         Toggle("Faster hi-res guidance", isOn: $model.settings.fastHiresGuidance)
                         Text(preset.engine == .sdxl
@@ -131,6 +143,7 @@ struct InspectorView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .help("Also used by the gallery's Upscale with detail pass.")
+                    }
                     Picker("Upscaler", selection: $model.settings.hiresUpscaler) {
                         Text(preset.engine == .sdxl ? "Built-in (bicubic)" : "Built-in (high-quality resize)").tag("")
                         ForEach(model.upscalerFiles, id: \.name) { f in
@@ -148,6 +161,10 @@ struct InspectorView: View {
             }
 
             CollapsibleSection(title: "LoRA", isExpanded: $openLoRA) {
+                if preset.engine == .zimage {
+                    Text("Z-Image doesn't take LoRAs yet: the ones listed here are skipped with this model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 ForEach($model.settings.loras) { $sel in
                     let file = model.loraFiles.first { $0.relativePath == sel.relativePath }
                     VStack(alignment: .leading, spacing: 4) {

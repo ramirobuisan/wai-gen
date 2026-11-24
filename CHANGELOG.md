@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Z-Image Anime (Turbo)** as a fifth model (⌘5), on a new MLX engine: put `z-image-anime-aio-bf16.safetensors`
+  (Civitai 2259646, all in one file: the Z-Image NextDiT, its Qwen3-4B text encoder and the Flux VAE) in
+  `models/checkpoints`. The preset follows the creator's workflow: 832×1216, 9 steps, CFG 1 (one model pass per step;
+  the negative prompt isn't used), Euler a with the new **Beta** schedule. About 14 s per image on an M5 Max (ComfyUI:
+  19 s), with live preview, hi-res fix, Upscale and face repair. Checked against ComfyUI's implementation: from the
+  same noise it makes the same image. LoRAs aren't supported on it yet.
 - **NoobAI-XL V-Pred 1.0** as a fourth model (⌘4): put `noobaiXLNAIXL_vPred10Version.safetensors` (Civitai 833294)
   in `models/checkpoints`. The SDXL engine now runs v-prediction checkpoints: it reads the checkpoint's own
   `v_pred` / `ztsnr` markers, uses the zero-terminal-SNR noise schedule and applies CFG Rescale 0.7 against

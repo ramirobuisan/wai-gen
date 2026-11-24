@@ -5,6 +5,10 @@ import WaiMLX
 enum EngineKind: String, Codable {
     case sdxl = "MLX"
     case anima = "MLX (Anima)"
+    case zimage = "MLX (Z-Image)"
+
+    /// The step cache (EasyCache) is built into the WAI v16 and WAI-ANIMA engines; Z-Image Turbo already runs ~9 steps.
+    var supportsStepCache: Bool { self != .zimage }
 
     /// "Faster hi-res guidance": the hi-res pass computes the guidance on every n-th step. WAI v16: every 2nd
     /// (every 3rd saves little more, the step cache already skips many); WAI-ANIMA: every 3rd, which looks the same,
@@ -13,6 +17,7 @@ enum EngineKind: String, Codable {
         switch self {
         case .sdxl: 2
         case .anima: 3
+        case .zimage: 1   // CFG 1: no guidance to reuse
         }
     }
 }
@@ -47,14 +52,25 @@ enum Sampler: String, CaseIterable, Codable, Identifiable {
 
 enum Scheduler: String, CaseIterable, Codable, Identifiable {
     case normal, karras, simple
+    /// ComfyUI's beta schedule (Z-Image only)
+    case beta
     var id: String { rawValue }
     var label: String { rawValue.capitalized }
+    /// Which engines offer it in the inspector.
+    func available(for engine: EngineKind) -> Bool {
+        switch self {
+        case .beta: engine == .zimage
+        case .karras: engine != .zimage
+        case .normal, .simple: true
+        }
+    }
     /// stable-diffusion.cpp: nil = the model's own default (Anima uses its flow schedule)
     var sdcppName: String? {
         switch self {
         case .normal: nil
         case .karras: "karras"
         case .simple: "simple"
+        case .beta: nil
         }
     }
 }
@@ -214,6 +230,19 @@ enum ModelCatalog {
                 prediction: .v, cfgRescale: 0.7),
             source: "Civitai 833294 v1190596 (V-Pred 1.0): Euler normal only (no Karras), 28-35 steps, CFG 4-5, "
                 + "832x1216, CFG Rescale ~0.7 recommended, zero terminal SNR"),
+        ModelPreset(
+            // Z-Image Turbo fine-tuned for anime, all in one file (NextDiT + Qwen3-4B + Flux VAE); distilled for ~9 steps
+            // at CFG 1 (one model call per step, the negative prompt isn't used). No LoRAs yet.
+            id: "z-image-anime-turbo", name: "Z-Image Anime (Turbo)", engine: .zimage,
+            checkpoint: "checkpoints/z-image-anime-aio-bf16.safetensors",
+            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
+            defaults: PresetDefaults(
+                // the creator's ComfyUI workflow: 832×1216, 9 steps, CFG 1, Euler a with the beta schedule, shift 3
+                width: 832, height: 1216, steps: 9, cfg: 1, sampler: .eulerA, scheduler: .beta,
+                hiresEnabled: false, hiresScale: 1.5, hiresSteps: 5, hiresDenoise: 0.35, maxHiresScale: 1.5,
+                qualityPrefix: "anime style, masterpiece, best quality", negative: "",
+                fast: .init(sampler: .eulerA, scheduler: .beta, steps: 9)),
+            source: "Civitai 2259646 v2543657 (Z-Image-Turbo-Anime AIO BF16): ~9 steps, CFG 1, Euler a, beta, 832×1216"),
     ]
 
     /// Where each model file comes from (the setup window's "Get It" buttons), by path in the models folder.
@@ -230,6 +259,8 @@ enum ModelCatalog {
         "upscale_models/RealESRGAN_x4plus_anime_6B.pth":
             ("GitHub", URL(string: "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.2.4")!),
         "detectors/face_yolov8m.safetensors": ("the README", URL(string: "https://github.com/ramirobuisan/wai-gen#models")!),
+        "checkpoints/z-image-anime-aio-bf16.safetensors":
+            ("Civitai", URL(string: "https://civitai.com/models/2259646?modelVersionId=2543657")!),
     ]
 
     static func preset(_ id: String) -> ModelPreset { presets.first { $0.id == id } ?? presets[0] }

@@ -84,8 +84,8 @@ struct GenerationError: LocalizedError {
 /// Runs jobs one at a time on a dedicated queue and keeps the models loaded between jobs: the selected
 /// image model with its helpers (upscaler, face detector). With "keep every image model loaded" (off by
 /// default) the other image models stay in memory too, so switching is instant. `preload` loads them in
-/// the background, always after any waiting job. Everything runs in MLX: WaiSDXL (WAI-illustrious) and
-/// WaiAnima (WAI-ANIMA).
+/// the background, always after any waiting job. Everything runs in MLX: WaiSDXL (WAI-illustrious, NoobAI-XL),
+/// WaiAnima (WAI-ANIMA) and WaiZImage (Z-Image Anime).
 final class GenerationService: @unchecked Sendable {
     static let keepLoadedKey = "keepModelsLoaded"
     static let preloadKey = "preloadModels"
@@ -95,6 +95,7 @@ final class GenerationService: @unchecked Sendable {
     // everything below is only touched on `queue`
     private var sdxl: [String: WaiSDXL] = [:]
     private var anima: [String: WaiAnima] = [:]
+    private var zimage: [String: WaiZImage] = [:]
     private var detector: YOLOFaceDetector?
     private var upscalers: [URL: ModelUpscaler] = [:]
     private var preloadSteps: [(name: String, load: () throws -> Void)] = []
@@ -117,6 +118,7 @@ final class GenerationService: @unchecked Sendable {
         queue.async {
             self.preloadSteps.removeAll()
             self.anima.removeAll()
+            self.zimage.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             self.sdxl.removeAll()
@@ -187,6 +189,7 @@ final class GenerationService: @unchecked Sendable {
         guard !Self.keepAllLoaded else { return }
         sdxl = sdxl.filter { $0.key == id }
         anima = anima.filter { $0.key == id }
+        zimage = zimage.filter { $0.key == id }
         Memory.clearCache()
     }
 
@@ -213,6 +216,17 @@ final class GenerationService: @unchecked Sendable {
         return e
     }
 
+    private func loadZImage(_ p: ModelPreset, _ root: URL) throws -> WaiZImage {
+        if let e = zimage[p.id] { return e }
+        makeRoom(keeping: p.id)
+        let e = try WaiZImage(aio: root.appendingPathComponent(p.checkpoint ?? ""))
+        zimage[p.id] = e
+        names[p.id] = p.name
+        Memory.clearCache()
+        reportModels()
+        return e
+    }
+
     /// YOLOv8 face detector in MLX (docs/PERFORMANCE.md round 5)
     private func loadDetector(_ root: URL) throws -> YOLOFaceDetector {
         if let d = detector { return d }
@@ -222,7 +236,7 @@ final class GenerationService: @unchecked Sendable {
     }
 
     private func reportModels(loading: String? = nil) {
-        let loaded = Set(sdxl.keys).union(anima.keys).compactMap { names[$0] }.sorted()
+        let loaded = Set(sdxl.keys).union(anima.keys).union(zimage.keys).compactMap { names[$0] }.sorted()
         onModelsChanged?(loaded, loading)
     }
 
@@ -236,6 +250,7 @@ final class GenerationService: @unchecked Sendable {
                 switch p.engine {
                 case .sdxl: steps.append((p.name, { _ = try self.loadSDXL(p, root) }))
                 case .anima: steps.append((p.name, { _ = try self.loadAnima(p, root) }))
+                case .zimage: steps.append((p.name, { _ = try self.loadZImage(p, root) }))
                 }
                 if !sharedAdded {   // right after the first model: what its first image needs
                     sharedAdded = true
@@ -277,6 +292,7 @@ final class GenerationService: @unchecked Sendable {
             self.preloadSteps.removeAll()
             self.sdxl.removeAll()
             self.anima.removeAll()
+            self.zimage.removeAll()
             self.detector = nil
             self.upscalers.removeAll()
             Memory.clearCache()
@@ -312,6 +328,12 @@ final class GenerationService: @unchecked Sendable {
             FileHandle.standardError.write(Data("WAI-ANIMA LoRA: \(report.unmatched.count) modules not applied\n".utf8))
         }
         return engine
+    }
+
+    private func zimageEngine(_ job: GenerationJob, _ progress: (JobProgress) -> Void) throws -> WaiZImage {
+        let p = job.preset
+        if zimage[p.id] == nil { progress(.loadingModel(p.name)) }
+        return try loadZImage(p, job.modelsRoot)   // LoRAs aren't supported on Z-Image (the app doesn't send them)
     }
 
     private func modelUpscaler(_ url: URL) throws -> ModelUpscaler {
@@ -388,13 +410,47 @@ final class GenerationService: @unchecked Sendable {
         case .dpmpp2m: .dpmpp2m
         }
         p.scheduler = switch job.scheduler {
-        case .normal: .discrete   // WAI-ANIMA's default (stable-diffusion.cpp's "discrete")
+        case .normal, .beta: .discrete   // WAI-ANIMA's default (stable-diffusion.cpp's "discrete")
         case .karras: .karras
         case .simple: .simple
         }
         p.seed = job.seed
         if job.stepCache { p.stepCache = Self.stepCacheThreshold }
         return p
+    }
+
+    private func zimageParameters(_ job: GenerationJob) -> ZImageParameters {
+        var p = ZImageParameters(prompt: job.positive)
+        p.negativePrompt = job.negative   // only used when CFG > 1
+        p.width = job.width / 16 * 16     // 2×2 patches of the 8× latent
+        p.height = job.height / 16 * 16
+        p.steps = job.steps
+        p.cfg = Float(job.cfg)
+        p.sampler = switch job.sampler {
+        case .eulerA: .eulerAncestral
+        case .euler: .euler
+        case .dpmpp2m: .dpmpp2m
+        }
+        p.scheduler = job.scheduler == .beta ? .beta : .simple
+        p.seed = job.seed
+        return p
+    }
+
+    /// Z-Image img2img at `size` (hi-res fix and gallery Upscale), like WAI-ANIMA's.
+    private func zimageRefine(_ engine: WaiZImage, _ job: GenerationJob, _ image: RGBImage, width: Int, height: Int,
+                              steps: Int, denoise: Double, progress: @escaping (JobProgress) -> Void) throws -> RGBImage {
+        var p = zimageParameters(job)
+        p.width = width
+        p.height = height
+        p.initImage = image.resized(width: width, height: height).pixels
+        p.strength = Float(denoise)
+        p.steps = Int((Double(steps) / max(denoise, 0.05)).rounded(.up))   // runs steps x strength of them
+        if isCancelled { throw CancellationError() }
+        progress(.preparingHires)
+        let out = try engine.generate(p, isCancelled: { self.isCancelled }, preview: preview(job, progress)) { i, n in
+            progress(.sampling(step: i, total: n, hires: true))
+        }
+        return RGBImage(out)
     }
 
     /// Step cache (EasyCache) threshold for both models, measured in docs/PERFORMANCE.md (round 4): the
@@ -452,6 +508,23 @@ final class GenerationService: @unchecked Sendable {
                                         height: Int(Double(job.height) * h.scale / 16) * 16, steps: h.steps,
                                         denoise: h.denoise, progress: progress)
             }
+
+        case .zimage:
+            let engine = try zimageEngine(job, progress)
+            if isCancelled { throw CancellationError() }
+            progress(.encoding)
+            let base = try engine.generate(zimageParameters(job), isCancelled: { self.isCancelled },
+                                           preview: preview(job, progress)) { i, n in
+                progress(.sampling(step: i, total: n, hires: false))
+            }
+            image = RGBImage(base)
+            if let h = job.hires {
+                progress(.upscaling)
+                if let u = job.hiresUpscaler { image = try modelUpscaler(u).upscale(image) }
+                image = try zimageRefine(engine, job, image, width: Int(Double(job.width) * h.scale / 16) * 16,
+                                         height: Int(Double(job.height) * h.scale / 16) * 16, steps: h.steps,
+                                         denoise: h.denoise, progress: progress)
+            }
         }
 
         let repair = try repairFaces(image, job, progress)
@@ -495,6 +568,14 @@ final class GenerationService: @unchecked Sendable {
             if let u = job.hiresUpscaler { img = try modelUpscaler(u).upscale(img) }
             image = try animaRefine(engine, job, img, width: up.width / 16 * 16, height: up.height / 16 * 16,
                                     steps: steps, denoise: denoise, progress: progress)
+
+        case .zimage:
+            let engine = try zimageEngine(job, progress)
+            progress(.upscaling)
+            var img = source
+            if let u = job.hiresUpscaler { img = try modelUpscaler(u).upscale(img) }
+            image = try zimageRefine(engine, job, img, width: up.width / 16 * 16, height: up.height / 16 * 16,
+                                     steps: steps, denoise: denoise, progress: progress)
         }
 
         let repair = try repairFaces(image, job, progress)
@@ -530,6 +611,12 @@ final class GenerationService: @unchecked Sendable {
         case .anima:
             let engine = try loadAnima(job.preset, job.modelsRoot)
             var p = animaParameters(job)
+            if !fr.prompt.isEmpty { p.prompt = fr.prompt }
+            fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
+                                           settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)
+        case .zimage:
+            let engine = try loadZImage(job.preset, job.modelsRoot)
+            var p = zimageParameters(job)
             if !fr.prompt.isEmpty { p.prompt = fr.prompt }
             fixed = try engine.repairFaces(rgb: image.pixels, width: image.width, height: image.height, faces: faces, p,
                                            settings: settings, isCancelled: { self.isCancelled }, progress: faceProgress)

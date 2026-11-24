@@ -22,6 +22,11 @@ public struct ZImageParameters: Sendable {
     public var sampler: AnimaSampler = .eulerAncestral
     public var scheduler: ZImageScheduler = .beta
     public var seed: Int64 = 42
+    /// img2img: RGB8 image of width x height; `strength` = denoise (hi-res fix, Upscale, face repair)
+    public var initImage: Data? = nil
+    public var strength: Float = 0.75
+    /// with `initImage`: one byte per pixel, 255 = repaint (masked img2img, as WAI-ANIMA's face repair)
+    public var mask: Data? = nil
 
     public init(prompt: String) { self.prompt = prompt }
 }
@@ -139,6 +144,27 @@ public final class WaiZImage {
         return out
     }
 
+    /// RGB8 [H, W, 3] -> sampler latent [1, 16, H/8, W/8] (the VAE's mean, then process_latent_in).
+    func encode(_ rgb: MLXArray) -> MLXArray {
+        let x = (rgb.asType(.float32) / 255 * 2 - 1)[.newAxis].asType(.bfloat16)
+        let (mean, _) = vae.encode(x)
+        return (mean.asType(.float32).transposed(0, 3, 1, 2) - Self.latentShift) * Self.latentScale
+    }
+
+    /// Flux's latent -> RGB factors (ComfyUI `latent_formats.Flux`) for the live preview: RGB8 [h, w, 3].
+    static let previewProj: [Float] = [
+        -0.0346, 0.0244, 0.0681, 0.0034, 0.0210, 0.0687, 0.0275, -0.0668, -0.0433, -0.0174, 0.0160, 0.0617,
+        0.0859, 0.0721, 0.0329, 0.0004, 0.0383, 0.0115, 0.0405, 0.0861, 0.0915, -0.0236, -0.0185, -0.0259,
+        -0.0245, 0.0250, 0.1180, 0.1008, 0.0755, -0.0421, -0.0515, 0.0201, 0.0011, 0.0428, -0.0012, -0.0036,
+        0.0817, 0.0765, 0.0749, -0.1264, -0.0522, -0.1103, -0.0280, -0.0881, -0.0499, -0.1262, -0.0982, -0.0778]
+    static let previewBias: [Float] = [-0.0329, -0.0718, -0.0851]
+
+    func preview(_ latent: MLXArray) -> MLXArray {
+        let z = latent[0].transposed(1, 2, 0)   // [h, w, 16]: ComfyUI applies the factors to the sampler latent
+        let rgb = matmul(z, MLXArray(Self.previewProj, [16, 3])) + MLXArray(Self.previewBias)
+        return (clip(rgb * 0.5 + 0.5, min: 0, max: 1) * 255).asType(.uint8)
+    }
+
     /// The VAE alone on a raw z [1, 16, h, w] (no latent-format scaling) -> [1, 8h, 8w, 3] in 0...1, like ComfyUI's
     /// `vae.decode` (for the reference check).
     public func decodeRaw(_ z: MLXArray) -> MLXArray {
@@ -151,26 +177,52 @@ public final class WaiZImage {
     /// Text to image; returns RGB8 [height, width, 3]. `noise` [1, 16, H/8, W/8] replaces the seeded start noise
     /// (to compare with ComfyUI on the same noise). `progress(step, total)`.
     public func generate(_ p: ZImageParameters, noise: MLXArray? = nil, isCancelled: () -> Bool = { false },
+                         preview: ((MLXArray) -> Void)? = nil,
                          progress: (Int, Int) -> Void = { _, _ in }) throws -> MLXArray {
         defer { Memory.clearCache() }
         guard p.width % 16 == 0, p.height % 16 == 0 else { throw WaiZImageError("width and height must be multiples of 16") }
         let (h, w) = (p.height / 8, p.width / 8)
-        let sigmas = Self.sigmas(steps: p.steps, scheduler: p.scheduler)
+        var sigmas = Self.sigmas(steps: p.steps, scheduler: p.scheduler)
+        var initLatent = MLXArray.zeros([1, 16, h, w])
+        var mask: MLXArray? = nil
+        if let initImage = p.initImage {
+            guard initImage.count == p.width * p.height * 3 else { throw WaiZImageError("init image size mismatch") }
+            initLatent = encode(MLXArray(initImage, [p.height, p.width, 3], type: UInt8.self))
+            if p.strength < 1 {   // the last steps × strength of the schedule, as WAI-ANIMA (stable-diffusion.cpp's t_enc)
+                let total = sigmas.count - 1
+                var tEnc = Int(Float(total) * p.strength)
+                if tEnc >= total { tEnc = total - 1 }
+                sigmas = Array(sigmas[(total - tEnc - 1)...])
+            }
+            if let m = p.mask {
+                guard m.count == p.width * p.height else { throw WaiZImageError("mask size mismatch") }
+                // round(mask / 255), then the max over each 8×8 block (latent size)
+                let full = (MLXArray(m, [p.height, p.width], type: UInt8.self).asType(.float32) / 255).round()
+                let lm = full.reshaped(h, 8, w, 8).max(axes: [1, 3]).reshaped(1, 1, h, w)
+                if lm.min().item(Float.self) < 1 { mask = lm }
+            }
+        }
         let cond = condition(p.prompt)
         let uncond: MLXArray? = p.cfg > 1
             ? (p.negativePrompt.isEmpty ? MLXArray.zeros(like: cond) : condition(p.negativePrompt)) : nil
 
         let keys = MLXRandom.split(key: MLXRandom.key(UInt64(bitPattern: p.seed)), into: sigmas.count + 1)
         let start = noise ?? MLXRandom.normal([1, 16, h, w], key: keys[0])
-        var x = start * sigmas[0]   // CONST noise scaling on an empty latent: σ·noise
+        var x = initLatent * (1 - sigmas[0]) + start * sigmas[0]   // CONST noise scaling
         eval(x)
 
         func denoise(_ x: MLXArray, _ sigma: Float) -> MLXArray {
             let c = dit(x, sigma: sigma, context: cond)
-            guard let uncond else { return x - sigma * c }
-            eval(c)
-            let u = dit(x, sigma: sigma, context: uncond)
-            return x - sigma * (u + p.cfg * (c - u))
+            var d: MLXArray
+            if let uncond {
+                eval(c)
+                let u = dit(x, sigma: sigma, context: uncond)
+                d = x - sigma * (u + p.cfg * (c - u))
+            } else {
+                d = x - sigma * c
+            }
+            if let mask { d = d * mask + initLatent * (1 - mask) }
+            return d
         }
 
         var old: MLXArray? = nil
@@ -206,10 +258,36 @@ public final class WaiZImage {
                 }
                 old = d
             }
-            eval(x)
+            if let preview {
+                let pv = self.preview(d)
+                eval(x, pv)
+                preview(pv)
+            } else {
+                eval(x)
+            }
             progress(i + 1, total)
         }
         return decode(x)
+    }
+
+    /// Repaints each face like ADetailer: masked img2img of a square crop around it (WAI-ANIMA's approach).
+    /// `p`: prompt, steps, cfg, sampler, scheduler, seed; `s.strength` = denoise. Returns RGB8 of width × height.
+    public func repairFaces(
+        rgb: Data, width: Int, height: Int, faces: [FaceBox], _ p: ZImageParameters, settings s: FaceRepairSettings,
+        isCancelled: () -> Bool = { false }, progress: (Int, Int, Int) -> Void = { _, _, _ in }
+    ) throws -> Data {
+        let size = s.inpaintSize
+        return try FaceRepairGeometry.apply(rgb: rgb, width: width, height: height, faces: faces, settings: s) { crop, mask, i in
+            var q = p
+            q.width = size
+            q.height = size
+            q.initImage = Data(crop)
+            q.mask = Data(mask.map { $0 > 0 ? 255 : 0 })
+            q.strength = s.strength
+            q.seed = p.seed &+ Int64(i)
+            let out = try generate(q, isCancelled: isCancelled) { progress(i, $0, $1) }
+            return out.asArray(UInt8.self)
+        }
     }
 }
 
