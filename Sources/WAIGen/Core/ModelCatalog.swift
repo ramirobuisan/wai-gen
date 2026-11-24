@@ -132,6 +132,9 @@ struct PresetDefaults: Equatable {
     var prediction: Prediction = .epsilon
     /// CFG Rescale the model card recommends (0 = off). ComfyUI convention, blend fixed at 0.7 in the engine
     var cfgRescale: Double = 0
+    /// A distilled few-step model at CFG 1 (Z-Image Turbo, Anima Turbo): Fast mode, the step cache and faster
+    /// hi-res guidance don't apply, so they're hidden and off
+    var distilled = false
 }
 
 struct FastSampling: Equatable {
@@ -158,6 +161,9 @@ struct ModelPreset: Identifiable, Hashable {
 
     var requiredFiles: [String] { [checkpoint, diffusionModel, llm, vae].compactMap { $0 } }
 
+    /// The step cache needs an engine that has it and a model that isn't a distilled few-step one.
+    var allowsStepCache: Bool { engine.supportsStepCache && !defaults.distilled }
+
     func missingFiles(in root: URL) -> [String] {
         requiredFiles.filter { !FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
     }
@@ -174,6 +180,12 @@ enum ModelCatalog {
     /// NoobAI-XL's recommended negative (Hugging Face Laxhar/noobai-XL-1.1)
     static let noobaiNegative =
         "nsfw, worst quality, old, early, low quality, lowres, signature, username, logo, bad hands, mutated hands, mammal, anthro, furry, ambiguous form, feral, semi-anthro"
+    /// WAI-SHUFFLE-NOOB's negative (its Civitai page), plus "nsfw" as in the app's other presets
+    static let shuffleNoobNegative =
+        "low quality, worst quality, normal quality, text, jpeg artifacts, bad anatomy, old, early, copyright name, watermark, artist name, signature, nsfw"
+    /// Nova Anime XL's Illustrious negative (its Civitai page, duplicates removed), plus "nsfw"
+    static let novaAnimeNegative =
+        "modern, recent, old, oldest, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured, long body, lowres, bad anatomy, bad hands, missing fingers, extra digits, fewer digits, cropped, very displeasing, (worst quality, bad quality:1.2), sketch, jpeg artifacts, signature, watermark, username, simple background, conjoined, bad ai-generated, nsfw"
     /// Earlier default negatives, upgraded to the current ones when found unchanged in saved settings.
     static let legacyNegatives: [String: String] = [
         "bad quality, worst quality, worst detail, sketch, censor, nsfw": waiNegative,
@@ -242,8 +254,48 @@ enum ModelCatalog {
                 // hi-res: 3 steps at denoise 0.30 looks like 5 at 0.35 for ~30 % less time (PERFORMANCE.md, round 12)
                 hiresEnabled: false, hiresScale: 1.5, hiresSteps: 3, hiresDenoise: 0.30, maxHiresScale: 1.5,
                 qualityPrefix: "anime style, masterpiece, best quality", negative: "",
-                fast: .init(sampler: .eulerA, scheduler: .beta, steps: 9)),
+                fast: .init(sampler: .eulerA, scheduler: .beta, steps: 9), distilled: true),
             source: "Civitai 2259646 v2543657 (Z-Image-Turbo-Anime AIO BF16): ~9 steps, CFG 1, Euler a, beta, 832×1216"),
+        ModelPreset(
+            // WAI0731's NoobAI v-prediction merge: the V-Pred engine (v-prediction + zero terminal SNR + CFG Rescale)
+            id: "wai-shuffle-noob-vpred", name: "WAI-SHUFFLE-NOOB V-Pred", engine: .sdxl,
+            checkpoint: "checkpoints/WAI-SHUFFLE-NOOB-v-pred-04.safetensors",
+            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
+            defaults: PresetDefaults(
+                // the author's settings: Euler a, 30 steps, CFG 5-7, 1024×1360, hi-res 1.5×
+                width: 1024, height: 1344, steps: 30, cfg: 5, sampler: .eulerA, scheduler: .normal,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
+                qualityPrefix: "masterpiece, best quality, newest, absurdres, highres, very awa", negative: shuffleNoobNegative,
+                fast: .init(sampler: .euler, scheduler: .normal, steps: 20),
+                // CFG Rescale 0.7 washes this merge out (grey, low contrast); without it the colours are right
+                prediction: .v, cfgRescale: 0),
+            source: "Civitai 989367 v2444683 (v-pred-04, by WAI0731): Euler a, 30 steps, CFG 5-7, 1024x1360, hires 1.5x"),
+        ModelPreset(
+            // Illustrious anime merge (NoobAI EPS 1.1 + Illustrious 2.0 + ChenkinNoob): the WAI v16 engine as it is
+            id: "nova-anime-xl-il19", name: "Nova Anime XL IL v19", engine: .sdxl,
+            checkpoint: "checkpoints/NovaAnimeILV190.safetensors",
+            diffusionModel: nil, llm: nil, vae: nil, characterList: .wai160,
+            defaults: PresetDefaults(
+                // its page (Illustrious): Euler a, 20-30 steps, CFG 4-6, its quality tags and negative
+                width: 832, height: 1216, steps: 28, cfg: 5, sampler: .eulerA, scheduler: .normal,
+                hiresEnabled: true, hiresScale: 1.5, hiresSteps: 15, hiresDenoise: 0.4, maxHiresScale: 2,
+                // + "safe" (NoobAI's rating tag; this merge leans to fan service without it)
+                qualityPrefix: "masterpiece, best quality, amazing quality, very aesthetic, high resolution, ultra-detailed, absurdres, newest, safe",
+                negative: novaAnimeNegative),
+            source: "Civitai 376130 v2940478 (IL v19.0): Euler a, 20-30 steps, CFG 4-6 (Illustrious settings)"),
+        ModelPreset(
+            // the distilled Anima from its makers: WAI-ANIMA's engine, text encoder and VAE, CFG 1 and ~10 steps
+            id: "anima-turbo-11", name: "Anima Turbo v1.1", engine: .anima, checkpoint: nil,
+            diffusionModel: "diffusion_models/anima-turbo-v1.1.safetensors",
+            llm: "text_encoders/qwen_3_06b_base.safetensors", vae: "vae/qwen_image_vae.safetensors",
+            characterList: .anima,
+            defaults: PresetDefaults(
+                // its page: CFG 1, 8-12 steps; prefix "masterpiece, best quality, score_7, safe"
+                width: 1024, height: 1344, steps: 10, cfg: 1, sampler: .eulerA, scheduler: .normal,
+                hiresEnabled: false, hiresScale: 1.5, hiresSteps: 4, hiresDenoise: 0.35, maxHiresScale: 1.5,
+                qualityPrefix: "masterpiece, best quality, score_7, safe", negative: "",
+                fast: .init(sampler: .eulerA, scheduler: .normal, steps: 10), distilled: true),
+            source: "Civitai 2458426 v3263843 (turbo v1.1, CircleStone Labs): CFG 1, 8-12 steps"),
     ]
 
     /// Where each model file comes from (the setup window's "Get It" buttons), by path in the models folder.
@@ -260,6 +312,12 @@ enum ModelCatalog {
         "upscale_models/RealESRGAN_x4plus_anime_6B.pth":
             ("GitHub", URL(string: "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.2.4")!),
         "detectors/face_yolov8m.safetensors": ("the README", URL(string: "https://github.com/ramirobuisan/wai-gen#models")!),
+        "checkpoints/WAI-SHUFFLE-NOOB-v-pred-04.safetensors":
+            ("Civitai", URL(string: "https://civitai.com/models/989367?modelVersionId=2444683")!),
+        "checkpoints/NovaAnimeILV190.safetensors":
+            ("Civitai", URL(string: "https://civitai.com/models/376130?modelVersionId=2940478")!),
+        "diffusion_models/anima-turbo-v1.1.safetensors":
+            ("Civitai", URL(string: "https://civitai.com/models/2458426?modelVersionId=3263843")!),
         "checkpoints/z-image-anime-aio-bf16.safetensors":
             ("Civitai", URL(string: "https://civitai.com/models/2259646?modelVersionId=2543657")!),
     ]

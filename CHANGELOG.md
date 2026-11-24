@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Three more models** (⌘6-⌘8), each with its page's recommended settings:
+  - **WAI-SHUFFLE-NOOB V-Pred** (Civitai 989367, by WAI0731): NoobAI v-prediction on the V-Pred engine; Euler a, 30
+    steps, CFG 5, 1024×1344. CFG Rescale stays off for it: at 0.7 the image came out grey and flat.
+  - **Nova Anime XL IL v19** (Civitai 376130): an Illustrious anime merge on the WAI v16 engine with all its speed-ups;
+    Euler a, 28 steps, CFG 5, its quality tags and negative prompt (plus "safe").
+  - **Anima Turbo v1.1** (Civitai 2458426, by Anima's makers): the distilled Anima, CFG 1 and 10 steps, about 11 s at
+    1024×1344; it uses WAI-ANIMA's text encoder and VAE.
+- WAI-ANIMA's engine skips the negative pass at CFG 1 (half the work for Anima Turbo; other CFGs unchanged). Distilled
+  presets (Anima Turbo, Z-Image) hide Fast mode, the step cache and faster hi-res guidance, which don't apply to them.
 - **LoRAs on Z-Image Anime**: LoRAs made for Z-Image (Turbo) now work, in ai-toolkit, kohya and ComfyUI layouts. They're
   added as a small extra term on each layer while generating, so they cost almost nothing, switch instantly and also
   work in the 8-bit mode below. Checked against ComfyUI's LoRA loading. LoHa / LoKr aren't supported on Z-Image yet.

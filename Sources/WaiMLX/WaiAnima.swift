@@ -247,7 +247,10 @@ public final class WaiAnima {
             let cached = cache != nil && active
             let condOut = cached ? cache!.run(anchor: true, x, step: step) { model(x, cond, t) } : model(x, cond, t)
             let guided: MLXArray
-            if let direction, reuseGuidance || (p.guidanceEvery > 1 && cached && cache!.skippingCurrentStep) {
+            if p.cfg == 1 {
+                // CFG 1 (distilled "turbo" models): uncond + 1·(cond − uncond) is just cond, skip the negative pass
+                guided = condOut
+            } else if let direction, reuseGuidance || (p.guidanceEvery > 1 && cached && cache!.skippingCurrentStep) {
                 // the last real guidance direction: on the steps between, and on steps the step cache skips (its
                 // negative-pass offset may be older than the prompt's, so cond − uncond would carry the step's move)
                 guided = condOut + (p.cfg - 1) * direction

@@ -84,7 +84,7 @@ final class GeneratorHost: RemoteJobHandler, @unchecked Sendable {
             hires: r.hires.map { ($0.scale, $0.steps, $0.denoise) },
             faceRepair: r.faceRepair.map { FaceRepairOptions(strength: $0.strength, confidence: $0.confidence, prompt: $0.prompt) },
             loras: loras, hiresUpscaler: upscaler, livePreview: r.livePreview,
-            stepCache: r.stepCache && sampler.supportsStepCache && preset.engine.supportsStepCache, upscale: upscale)
+            stepCache: r.stepCache && sampler.supportsStepCache && preset.allowsStepCache, upscale: upscale)
         job.id = id
         job.hiresGuidanceEvery = min(max(r.hiresGuidanceEvery ?? 1, 1), 4)
 

@@ -88,10 +88,10 @@ struct InspectorView: View {
                 SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.steps) }, set: { model.settings.steps = Int($0) }),
                           range: 8 ... 60, step: 1, format: "%.0f")
                 SliderRow(title: "CFG", value: $model.settings.cfg, range: 1 ... 12, step: 0.5, format: "%.1f")
-                if preset.engine == .zimage {
+                if preset.defaults.distilled {
                     Text(model.settings.cfg <= 1
-                         ? "Turbo model: CFG 1 and ~9 steps. The negative prompt isn't used at CFG 1."
-                         : "Turbo model: made for CFG 1; above 1 each step takes twice as long.")
+                         ? "Distilled model: CFG 1 and about \(preset.defaults.steps) steps. The negative prompt isn't used at CFG 1."
+                         : "Distilled model: made for CFG 1; above 1 each step takes twice as long.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Picker("Sampler", selection: $model.settings.sampler) {
@@ -106,8 +106,8 @@ struct InspectorView: View {
                 Stepper("Images: \(model.settings.batchCount)", value: $model.settings.batchCount, in: 1 ... 16)
                 Toggle("Live preview", isOn: $model.settings.livePreview)
                     .help("Shows the image forming at every step. It's computed together with each step, so it doesn't slow generation down.")
-                // Z-Image Turbo already runs ~9 steps: no Fast mode or step cache
-                if preset.engine != .zimage {
+                // distilled few-step models (Z-Image Turbo, Anima Turbo): no Fast mode or step cache
+                if !preset.defaults.distilled {
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Fast mode", isOn: $model.settings.fastMode)
                     Text("\(preset.defaults.fast.sampler.label) · \(preset.defaults.fast.scheduler.label) · \(preset.defaults.fast.steps) steps: about 30 % faster, a slightly different look")
@@ -134,7 +134,7 @@ struct InspectorView: View {
                     SliderRow(title: "Steps", value: Binding(get: { Double(model.settings.hiresSteps) }, set: { model.settings.hiresSteps = Int($0) }),
                               range: 5 ... 40, step: 1, format: "%.0f")
                     SliderRow(title: "Denoise", value: $model.settings.hiresDenoise, range: 0.1 ... 0.8, step: 0.05, format: "%.2f")
-                    if preset.engine != .zimage {   // CFG 1: no guidance to reuse
+                    if !preset.defaults.distilled {   // CFG 1: no guidance to reuse
                     VStack(alignment: .leading, spacing: 2) {
                         Toggle("Faster hi-res guidance", isOn: $model.settings.fastHiresGuidance)
                         Text(preset.engine == .sdxl

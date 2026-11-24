@@ -457,7 +457,7 @@ final class AppModel {
             return
         }
         // Fast mode: the preset's quicker sampler / steps (Z-Image Turbo is already a few-step model)
-        let fast = s.fastMode && preset.engine != .zimage ? preset.defaults.fast : nil
+        let fast = s.fastMode && !preset.defaults.distilled ? preset.defaults.fast : nil
         for i in 0 ..< max(1, s.batchCount) {
             let seed = s.seed < 0 ? Int64(UInt32.random(in: 0 ... UInt32.max)) : s.seed + Int64(i)
             var rng = SeededRNG(state: UInt64(bitPattern: seed) ^ 0xA5A5)
@@ -478,9 +478,9 @@ final class AppModel {
                 loras: jobLoRAs,
                 hiresUpscaler: upscalerURL,
                 livePreview: s.livePreview,
-                stepCache: s.stepCache && preset.engine.supportsStepCache && (fast?.sampler ?? s.sampler).supportsStepCache,
+                stepCache: s.stepCache && preset.allowsStepCache && (fast?.sampler ?? s.sampler).supportsStepCache,
                 artists: s.artists,
-                hiresGuidanceEvery: s.fastHiresGuidance ? preset.engine.fastHiresGuidanceEvery : 1)
+                hiresGuidanceEvery: s.fastHiresGuidance && !preset.defaults.distilled ? preset.engine.fastHiresGuidanceEvery : 1)
             pending.append(job)
         }
         processNext()
@@ -555,10 +555,10 @@ final class AppModel {
             faceRepair: detail && s.faceRepair && faceDetectorAvailable
                 ? FaceRepairOptions(strength: s.faceStrength, confidence: s.faceConfidence, prompt: "") : nil,
             loras: loras, hiresUpscaler: upscalerURL, livePreview: s.livePreview,
-            stepCache: s.stepCache && p.engine.supportsStepCache && upscaleSampler.supportsStepCache,
+            stepCache: s.stepCache && p.allowsStepCache && upscaleSampler.supportsStepCache,
             upscale: UpscaleRequest(source: item.url, width: tw, height: th, detailPass: detail),
             artists: r.map { $0.artists ?? [] } ?? s.artists,
-            hiresGuidanceEvery: detail && s.fastHiresGuidance ? p.engine.fastHiresGuidanceEvery : 1)
+            hiresGuidanceEvery: detail && s.fastHiresGuidance && !p.defaults.distilled ? p.engine.fastHiresGuidanceEvery : 1)
         pending.append(job)
         processNext()
     }
