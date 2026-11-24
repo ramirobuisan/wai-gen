@@ -9,7 +9,7 @@ import MLXNN
 /// stable-diffusion.cpp's output; float32: 0.02 s, 0.9999997. The images look the same either way
 /// (docs/PERFORMANCE.md, round 5); bf16 weights with float32 math was 0.04 s (the weights get converted every call).
 public final class Qwen3TextEncoder {
-    private let w: [String: MLXArray]
+    private var w: [String: MLXArray]
     private let dtype: DType
     public let layers: Int
     public let hidden: Int
@@ -27,32 +27,71 @@ public final class Qwen3TextEncoder {
         public let errorDescription: String?
     }
 
-    public init(url: URL, dtype: DType = .bfloat16, keyPrefix: String? = nil) throws {
+    /// `quantizeBits`: quantize the projections as they're read (see `quantize`).
+    public init(url: URL, dtype: DType = .bfloat16, keyPrefix: String? = nil, quantizeBits: Int? = nil) throws {
         var weights: [String: MLXArray] = [:]
-        for (k, v) in try loadArrays(url: url) {
-            // AIO files (z-image-anime) keep all three models in one file: take only the keys of this model
-            if let keyPrefix, !k.hasPrefix(keyPrefix) { continue }
-            var key = keyPrefix.map { String(k.dropFirst($0.count)) } ?? k
-            for prefix in ["text_encoders.llm.", "model."] where key.hasPrefix(prefix) { key = String(key.dropFirst(prefix.count)) }
-            weights[key] = v.asType(dtype)
+        var packed: [String: (wq: MLXArray, scales: MLXArray, biases: MLXArray?)] = [:]
+        do {
+            // lazily loaded; with `quantizeBits` each projection is packed as it's read and its copy dropped
+            var all = try loadArrays(url: url)
+            for k in Array(all.keys) {
+                // AIO files (z-image-anime) keep all three models in one file: take only the keys of this model
+                if let keyPrefix, !k.hasPrefix(keyPrefix) { continue }
+                guard let v = all.removeValue(forKey: k) else { continue }
+                var key = keyPrefix.map { String(k.dropFirst($0.count)) } ?? k
+                for prefix in ["text_encoders.llm.", "model."] where key.hasPrefix(prefix) { key = String(key.dropFirst(prefix.count)) }
+                if let bits = quantizeBits, key.hasSuffix("_proj.weight"), v.ndim == 2, v.dim(1) % 64 == 0 {
+                    let q = quantized(v.asType(dtype), groupSize: 64, bits: bits)
+                    eval([q.wq, q.scales] + (q.biases.map { [$0] } ?? []))
+                    packed[key] = (q.wq, q.scales, q.biases)
+                } else {
+                    weights[key] = v.asType(dtype)
+                }
+            }
         }
-        guard let embed = weights["embed_tokens.weight"], let q = weights["layers.0.self_attn.q_proj.weight"],
-              let k = weights["layers.0.self_attn.k_proj.weight"], let qn = weights["layers.0.self_attn.q_norm.weight"]
+        func rows(_ key: String) -> Int? { weights[key]?.dim(0) ?? packed[key]?.wq.dim(0) }
+        guard let embed = weights["embed_tokens.weight"], let qRows = rows("layers.0.self_attn.q_proj.weight"),
+              let kRows = rows("layers.0.self_attn.k_proj.weight"), let qn = weights["layers.0.self_attn.q_norm.weight"]
         else { throw Unsupported(errorDescription: "\(url.lastPathComponent) isn't a Qwen3 model") }
         var n = 0
-        while weights["layers.\(n).self_attn.q_proj.weight"] != nil { n += 1 }
+        while rows("layers.\(n).self_attn.q_proj.weight") != nil { n += 1 }
         layers = n
         hidden = embed.dim(1)
         headDim = qn.dim(0)
-        heads = q.dim(0) / headDim
-        kvHeads = k.dim(0) / headDim
+        heads = qRows / headDim
+        kvHeads = kRows / headDim
         w = weights
+        qw = packed
+        if !packed.isEmpty { quantBits = quantizeBits }
         self.dtype = dtype
         eval(Array(w.values))
+        Memory.clearCache()
     }
 
+    private var qw: [String: (wq: MLXArray, scales: MLXArray, biases: MLXArray?)] = [:]
+    public private(set) var quantBits: Int? = nil
+
     private func linear(_ x: MLXArray, _ name: String) -> MLXArray {
-        matmul(x, w[name + ".weight"]!.T)
+        if let q = qw[name + ".weight"] {
+            return quantizedMM(x, q.wq, scales: q.scales, biases: q.biases, transpose: true, groupSize: 64, bits: quantBits)
+        }
+        return matmul(x, w[name + ".weight"]!.T)
+    }
+
+    /// Quantizes the attention and MLP projections to `bits` (MLX affine, groups of 64); embeddings and norms stay
+    /// as they are. Once per model; off unless asked (Z-Image's Qwen3-4B).
+    public func quantize(bits: Int) {
+        guard quantBits == nil else { return }
+        let names = w.keys.filter { $0.hasSuffix("_proj.weight") }
+        for k in names {
+            guard let v = w[k], v.ndim == 2, v.dim(1) % 64 == 0 else { continue }
+            let r = quantized(v, groupSize: 64, bits: bits)
+            eval([r.wq, r.scales] + (r.biases.map { [$0] } ?? []))
+            qw[k] = (r.wq, r.scales, r.biases)
+            w[k] = nil
+        }
+        quantBits = bits
+        Memory.clearCache()
     }
 
     /// token ids -> [n, hidden] float32

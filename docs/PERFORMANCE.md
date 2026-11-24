@@ -623,6 +623,35 @@ DoRA (`dora_scale`) and Tucker-decomposed LyCORIS are still reported as unsuppor
 
 ![NoobAI-XL: no LoRA / LoRA / LoCon / LoKr / LoHa / LoKr with trained norms](images/noobai-lora-formats.jpg)
 
+## Round 12 (2026-11-24): Z-Image Anime — memory, compile, hi-res, LoRAs
+
+M5 Max, 832×1216, 9 steps, Euler a + beta, CFG 1, `waigen-cli --zimage`. Another job (Metal shader compiles, a port
+builder) was running on and off, so absolute times swung by up to 2×; options were compared back to back or alternated,
+and hi-res passes against the base pass of the same run.
+
+| Setup | Weights | Peak while generating | Speed | vs bf16 |
+|---|---|---|---|---|
+| bf16 (default) | 20.4 GB | 27.3 GB | 1.4-1.6 s/step | — |
+| `compile` of the DiT | 20.4 GB | 27.3 GB | same | identical |
+| 8-bit DiT | 14.6 GB | 21.6 GB | not faster (≈ 0-20 % slower) | 27.6 dB, same image |
+| 8-bit DiT + 8-bit text encoder | 11.2 GB | 18.2 GB | not faster | 25-28 dB, same image |
+| 4-bit DiT | 11.5 GB | 18.5 GB | slower | 17 dB, another image |
+| 4-bit text encoder | 15.1 GB | 22.1 GB | — | 17 dB, another image |
+
+The DiT is compute-bound (~50 TFLOP per step at 1 MP), so neither compile nor quantization makes it faster; bf16 stays
+the default. 8-bit model + text encoder became an option for smaller Macs (Settings → Memory, on by default below
+48 GB). Quantizing while loading, with each bf16 tensor released as soon as it's packed, keeps the load peak at
+11.3 GB (23.5 GB when the bf16 copies stayed referenced until the end of loading).
+
+**Hi-res 1.5×** (RealESRGAN anime, then img2img; a hi-res step at 1248×1824 costs ~2.8-3 base steps and the pass runs
+steps + 1 of them): 5 steps / denoise 0.35 ≈ 25 s, 4 / 0.30 ≈ 21 s, 3 / 0.30 ≈ 17 s, 2 / 0.25 ≈ 12 s, upscaler only
+1.5 s. All refined versions look alike (≈ 25 dB from 5 / 0.35, fine-detail differences); upscaler only leaves ESRGAN's
+waxy smears on fabric. New Z-Image default: **3 steps, denoise 0.30**.
+
+**LoRAs** (run-time low-rank terms, rank 32, 240 modules): ~5 % per step. With the Disney style LoRA, MLX vs ComfyUI's
+own LoRA loading from the same noise (Euler, beta): 30.8 dB (32.2 dB without a LoRA; the LoRA itself moves the image
+13 dB), i.e. the same image. Also works on the 8-bit model (24.6 dB from bf16 + LoRA).
+
 ## Possible next steps
 
 - Everything runs in MLX (round 6). Before that, stable-diffusion.cpp kept WAI-ANIMA's tokenizers, sampler and masked img2img.

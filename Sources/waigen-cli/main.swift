@@ -123,6 +123,8 @@ let esrganTest = take("--esrgan-test")            // upscale an image with --hir
 let zimagePath = take("--zimage")                 // Z-Image AIO checkpoint (DiT + Qwen3-4B + Flux VAE)
 let zimageCheck = take("--zimage-check")          // ref.safetensors: check text encoder, DiT and VAE against ComfyUI
 let zimageNoise = take("--zimage-noise")          // file.safetensors:key — Z-Image start noise (parity with ComfyUI)
+let zimageQuant = take("--zimage-quant").flatMap(Int.init)     // quantize the Z-Image DiT to 8 / 6 / 4 bits
+let zimageTEQuant = take("--zimage-te-quant").flatMap(Int.init) // quantize its Qwen3-4B text encoder
 let benchConv = flag("--bench-conv")              // 3x3 convs: MLX's conv2d vs matmul rewrites (time + diff)
 let serveTest = take("--serve-test")              // port: a test generator (dummy images) to check the protocol
 let remoteAddress = take("--remote")             // host[:port] of a Mac sharing WAI Gen: generate there
@@ -278,7 +280,12 @@ if let remoteAddress {
                 seed: Int64(truncatingIfNeeded: seed),
                 hires: hires.map { .init(scale: Double($0), steps: hiresSteps ?? 15, denoise: Double(hiresDenoise ?? 0.4)) },
                 faceRepair: faceDetector != nil ? .init(strength: Double(faceStrength), confidence: 0.3, prompt: "") : nil,
-                loras: loras.map { .init(relativePath: $0.url.lastPathComponent, strength: Double($0.strength)) },
+                // the path inside the models' loras folder (subfolders included), else the file name
+                loras: loras.map { l in
+                    let path = l.url.standardizedFileURL.path
+                    let rel = path.range(of: "/loras/").map { String(path[$0.upperBound...]) } ?? l.url.lastPathComponent
+                    return .init(relativePath: rel, strength: Double(l.strength))
+                },
                 hiresUpscaler: hiresUpscalerPath, livePreview: previewDir != nil, stepCache: stepCacheThreshold != nil,
                 upscale: nil)
             if let hiresGuidanceEvery { job.hiresGuidanceEvery = hiresGuidanceEvery }
@@ -381,8 +388,19 @@ if let zimagePath {
     // ---------------- Z-Image (Turbo) AIO: docs/plans/z-image-anime.md
     let tl = Date()
     let zimage: WaiZImage
-    do { zimage = try WaiZImage(aio: URL(fileURLWithPath: zimagePath)) } catch { fail(error.localizedDescription) }
+    do {
+        zimage = try WaiZImage(aio: URL(fileURLWithPath: zimagePath), ditBits: zimageQuant, textEncoderBits: zimageTEQuant)
+    } catch { fail(error.localizedDescription) }
     let te = zimage.textEncoder, dit = zimage.dit
+    print(String(format: "load peak %.2f GB (DiT %@, text encoder %@)", Double(Memory.peakMemory) / 1e9,
+                 zimageQuant.map { "\($0)-bit" } ?? "bf16", zimageTEQuant.map { "\($0)-bit" } ?? "bf16"))
+    if !loras.isEmpty {
+        do {
+            let r = try zimage.setLoRAs(loras)
+            print("LoRA: \(r.applied) modules from \(r.files) file(s), \(r.unmatched.count) unmatched, \(r.unsupported) unsupported")
+        } catch { fail(error.localizedDescription) }
+    }
+    print(String(format: "weights in memory: %.2f GB", Double(Memory.activeMemory) / 1e9))
     print(String(format: "Z-Image loaded in %.1fs: Qwen3-4B %d layers (hidden %d), DiT %d+%d refiner + %d layers",
                  Date().timeIntervalSince(tl), te.encoder.layers, te.encoder.hidden, dit.refinerLayers,
                  dit.refinerLayers, dit.layers))
@@ -450,14 +468,42 @@ if let zimagePath {
         }
         p.seed = Int64(truncatingIfNeeded: seed &+ UInt64(run - 1))
         let ts = Date()
+        Memory.peakMemory = 0   // resets the peak
         do {
             let out = try zimage.generate(p, noise: startNoise) { i, n in showProgress("sampling", i, n) }
             FileHandle.standardError.write(Data("\n".utf8))
-            let img = RGBImage(out)
+            var img = RGBImage(out)
+            let tm = zimage.lastTimings
+            var hiresLine = ""
+            if let hires, hires > 1 {
+                // the app's hi-res fix: upscaler (or a resize), then img2img for hires-steps of a steps/denoise schedule
+                let th = Date()
+                let up = try hiresUpscalerPath.map { try upscaleImage(img, model: $0) } ?? img
+                let tu = Date().timeIntervalSince(th)
+                var q = p
+                q.width = Int(Float(p.width) * hires) / 16 * 16
+                q.height = Int(Float(p.height) * hires) / 16 * 16
+                let denoise = hiresDenoise ?? 0.35
+                q.initImage = up.resized(width: q.width, height: q.height).pixels
+                q.strength = denoise
+                q.steps = Int((Float(hiresSteps ?? 5) / max(denoise, 0.05)).rounded(.up))
+                q.seed = p.seed
+                if hiresSteps == 0 {
+                    img = up.resized(width: q.width, height: q.height)   // upscaler only
+                } else {
+                    img = RGBImage(try zimage.generate(q) { i, n in showProgress("hires", i, n) })
+                    FileHandle.standardError.write(Data("\n".utf8))
+                }
+                let h = zimage.lastTimings
+                hiresLine = String(format: " | hires %.2fs (upscaler %.2fs, sample %.2fs, decode %.2fs)",
+                                   Date().timeIntervalSince(th), tu, hiresSteps == 0 ? 0 : h.sample, hiresSteps == 0 ? 0 : h.decode)
+            }
             try Image(img.array).save(url: outputURL(run))
-            print(String(format: "run %d seed %lld | %dx%d, %d steps %@ %@, cfg %.1f | total %.2fs -> %@", run, p.seed,
-                         img.width, img.height, p.steps, p.sampler.rawValue, p.scheduler.rawValue, p.cfg,
-                         Date().timeIntervalSince(ts), outputURL(run).lastPathComponent))
+            print(String(format: "run %d seed %lld | %dx%d, %d steps %@ %@, cfg %.1f | encode %.2fs sample %.2fs (%.3f s/step) "
+                         + "decode %.2fs%@ | total %.2fs | peak %.2f GB -> %@", run, p.seed,
+                         img.width, img.height, p.steps, p.sampler.rawValue, p.scheduler.rawValue, p.cfg, tm.encode, tm.sample,
+                         tm.sample / Double(max(p.steps, 1)), tm.decode, hiresLine, Date().timeIntervalSince(ts),
+                         Double(Memory.peakMemory) / 1e9, outputURL(run).lastPathComponent))
         } catch { fail(error.localizedDescription) }
     }
     finish(0)

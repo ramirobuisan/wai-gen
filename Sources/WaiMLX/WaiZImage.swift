@@ -42,11 +42,18 @@ public final class WaiZImage {
     static let latentScale: Float = 0.3611
     static let latentShift: Float = 0.1159
     private var condCache: [(String, MLXArray)] = []
+    /// Seconds spent in the last `generate`: prompt encoding, sampling, VAE decode.
+    public private(set) var lastTimings: (encode: Double, sample: Double, decode: Double) = (0, 0, 0)
 
-    public init(aio url: URL) throws {
-        let encoder = try Qwen3TextEncoder(url: url, keyPrefix: "text_encoders.qwen3_4b.transformer.model.")
+    /// LoRAs on the DiT (see ZImageDiT.setLoRAs); the text encoder is left as it is.
+    public func setLoRAs(_ loras: [LoRASpec]) throws -> LoRAReport { try dit.setLoRAs(loras) }
+
+    /// `ditBits` / `textEncoderBits`: quantize while loading (8 = the app's "use less memory": 11 GB instead of 20).
+    public init(aio url: URL, ditBits: Int? = nil, textEncoderBits: Int? = nil) throws {
+        let encoder = try Qwen3TextEncoder(url: url, keyPrefix: "text_encoders.qwen3_4b.transformer.model.",
+                                           quantizeBits: textEncoderBits)
         textEncoder = ZImageTextEncoder(encoder: encoder, tokenizer: try AnimaTokenizer().qwen)
-        dit = try ZImageDiT(url: url)
+        dit = try ZImageDiT(url: url, quantizeBits: ditBits)
         let config = try JSONDecoder().decode(AutoencoderConfiguration.self, from: Data("""
             {"in_channels": 3, "out_channels": 3, "latent_channels": 16, "block_out_channels": [128, 256, 512, 512],
              "layers_per_block": 2, "norm_num_groups": 32, "scaling_factor": 1.0}
@@ -129,7 +136,10 @@ public final class WaiZImage {
 
     func condition(_ text: String) -> MLXArray {
         if let hit = condCache.first(where: { $0.0 == text }) { return hit.1 }
-        let c = textEncoder.encode(text)
+        // Qwen3 reads the text as written: drop the A1111 weight syntax the app's prompts may carry ("(tag:1.2)",
+        // "\(" escapes in tags such as "artoria pendragon \(fate\)") and keep the words
+        let plain = PromptAttention.parse(text).map(\.0).joined()
+        let c = textEncoder.encode(plain)
         condCache.append((text, c))
         if condCache.count > 4 { condCache.removeFirst() }
         return c
@@ -202,9 +212,13 @@ public final class WaiZImage {
                 if lm.min().item(Float.self) < 1 { mask = lm }
             }
         }
+        let tEncode = Date()
         let cond = condition(p.prompt)
         let uncond: MLXArray? = p.cfg > 1
             ? (p.negativePrompt.isEmpty ? MLXArray.zeros(like: cond) : condition(p.negativePrompt)) : nil
+        if let uncond { eval(uncond) }
+        lastTimings.encode = Date().timeIntervalSince(tEncode)
+        let tSample = Date()
 
         let keys = MLXRandom.split(key: MLXRandom.key(UInt64(bitPattern: p.seed)), into: sigmas.count + 1)
         let start = noise ?? MLXRandom.normal([1, 16, h, w], key: keys[0])
@@ -267,7 +281,11 @@ public final class WaiZImage {
             }
             progress(i + 1, total)
         }
-        return decode(x)
+        lastTimings.sample = Date().timeIntervalSince(tSample)
+        let tDecode = Date()
+        let image = decode(x)
+        lastTimings.decode = Date().timeIntervalSince(tDecode)
+        return image
     }
 
     /// Repaints each face like ADetailer: masked img2img of a square crop around it (WAI-ANIMA's approach).
